@@ -188,6 +188,11 @@ flowchart LR
 
 ## Contributing and license
 
-Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). This project is
-released under the [MIT License](LICENSE). The bundled Loghub dataset remains under
-its separately included upstream license.
+Contributions are welcome. Good places to help include agent evaluations, safe
+read-only integrations, observability, memory governance, documentation, and UI
+accessibility. See the [roadmap](ROADMAP.md) and
+[contribution guide](CONTRIBUTING.md), then open an issue before starting a large
+change.
+
+This project is released under the [MIT License](LICENSE). The bundled Loghub
+dataset remains under its separately included upstream license.
