@@ -96,6 +96,24 @@ IMAGE_QUALITY=medium
 Production processes should omit `--reload`, bind behind a TLS-enabled reverse proxy,
 and set `APP_ENV=production`. Startup will require a real tool adapter and API key.
 
+### Vercel deployment
+
+The Vercel FastAPI entrypoint is declared in `pyproject.toml` as `api:app`. Add
+`OPENAI_API_KEY` and other secrets through the Vercel project settings, never to the
+repository. For a public demonstration deployment, configure these writable paths:
+
+```env
+MEMORY_DB_PATH=/tmp/agent_memory.db
+AUDIT_LOG_PATH=/tmp/audit.jsonl
+GENERATED_IMAGE_DIR=/tmp/generated
+```
+
+Vercel functions have ephemeral local storage. SQLite memory, audit events, rate-limit
+state, graph checkpoints, and generated files can disappear between invocations and
+are not shared reliably across instances. Therefore Vercel is suitable only for the
+demo UI/API. Before calling the deployment production-ready, replace those components
+with managed persistent services and return generated images from object storage.
+
 Usage history contains redacted prompts and is therefore admin-only. Configure a
 random value of at least 16 characters:
 

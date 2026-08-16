@@ -163,6 +163,17 @@ def health():
     return {"status": "ok", "environment": settings.app_env, "tool_mode": settings.tool_mode}
 
 
+@app.get("/generated/{filename}", include_in_schema=False)
+def generated_image(filename: str):
+    """Serve an image from the configured output directory without allowing traversal."""
+    if not filename.startswith("devops-visual-") or not filename.endswith(".png"):
+        raise HTTPException(status_code=404, detail="Image not found")
+    image_path = settings.generated_image_dir / filename
+    if not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(image_path, media_type="image/png")
+
+
 @app.get("/ready")
 def readiness(request: Request):
     try:

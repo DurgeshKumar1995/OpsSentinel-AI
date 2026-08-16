@@ -42,4 +42,4 @@ class VisualGenerator:
             raise RuntimeError("Image model returned no image data")
         filename = f"devops-visual-{uuid4().hex}.png"
         (self.output_dir / filename).write_bytes(base64.b64decode(encoded))
-        return f"/static/generated/{filename}"
+        return f"/generated/{filename}"

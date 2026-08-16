@@ -1,5 +1,6 @@
 """Validated application configuration loaded from environment variables."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -9,6 +10,11 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
+
+
+def _runtime_path(local_path: str, vercel_path: str) -> Path:
+    """Use Vercel's writable temporary directory when running serverless."""
+    return Path(vercel_path if os.getenv("VERCEL") else local_path)
 
 
 class Settings(BaseSettings):
@@ -26,8 +32,12 @@ class Settings(BaseSettings):
     max_agent_steps: int = Field(default=4, ge=2, le=20)
     rate_limit_requests: int = Field(default=20, ge=1, le=10_000)
     rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
-    memory_db_path: Path = Path("data/agent_memory.db")
-    audit_log_path: Path = Path("data/audit.jsonl")
+    memory_db_path: Path = Field(
+        default_factory=lambda: _runtime_path("data/agent_memory.db", "/tmp/agent_memory.db")
+    )
+    audit_log_path: Path = Field(
+        default_factory=lambda: _runtime_path("data/audit.jsonl", "/tmp/audit.jsonl")
+    )
     usage_admin_key: str | None = Field(default=None, repr=False)
     tool_mode: Literal["mock", "live"] = "mock"
     allowed_services: str = "auth-service,payment-gateway"
@@ -39,7 +49,9 @@ class Settings(BaseSettings):
     image_model: str = "gpt-image-2"
     image_size: Literal["1024x1024", "1536x1024", "1024x1536"] = "1536x1024"
     image_quality: Literal["low", "medium", "high"] = "medium"
-    generated_image_dir: Path = Path("web/generated")
+    generated_image_dir: Path = Field(
+        default_factory=lambda: _runtime_path("web/generated", "/tmp/generated")
+    )
     langchain_tracing_v2: bool = False
     langchain_api_key: str | None = Field(default=None, repr=False)
     langchain_project: str = "SafeOps-Agent"

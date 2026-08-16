@@ -374,7 +374,7 @@ class ApiTests(unittest.TestCase):
     def test_visual_endpoint_returns_generated_image_url(self):
         generator = Mock()
         generator.available = True
-        generator.generate.return_value = "/static/generated/test-diagram.png"
+        generator.generate.return_value = "/generated/test-diagram.png"
         with patch.object(self.client.app.state, "visual_generator", generator):
             response = self.client.post(
                 "/visuals",
@@ -384,7 +384,7 @@ class ApiTests(unittest.TestCase):
                 },
             )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()["image_url"], "/static/generated/test-diagram.png")
+        self.assertEqual(response.json()["image_url"], "/generated/test-diagram.png")
         generator.generate.assert_called_once()
 
     def test_visual_endpoint_blocks_injection(self):
