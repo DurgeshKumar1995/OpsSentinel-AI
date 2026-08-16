@@ -4,6 +4,16 @@ A public reference implementation of a human-supervised DevOps agent. SafeOps
 investigates incidents, uses local and model-driven tools, requests approval before
 risky operations, and improves retrieval from reviewed outcomes.
 
+## Live demo
+
+- [Open OpsSentinel AI](https://opssentinel-ai.onrender.com/)
+- [Health status](https://opssentinel-ai.onrender.com/health)
+- [Developer API documentation](https://opssentinel-ai.onrender.com/developer/docs)
+
+The hosted instance is for testing and demonstration. It runs with mock infrastructure
+tools and may take a short time to wake after inactivity. Do not submit credentials,
+customer data, proprietary logs, or other sensitive information.
+
 > **Project status:** portfolio-quality reference application. The included
 > infrastructure adapters are mocks; do not connect this repository directly to
 > production systems.
