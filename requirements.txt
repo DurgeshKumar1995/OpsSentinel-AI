@@ -4,7 +4,7 @@ langchain-core==1.5.4
 langchain-openai==1.4.3
 langgraph==1.2.11
 langgraph-checkpoint==4.2.0
-openai==2.54.0
+openai==3.0.0
 pydantic==2.13.4
 pydantic-settings==2.10.1
 python-dotenv==1.2.2
