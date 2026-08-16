@@ -1,0 +1,17 @@
+# Keep repository text files consistent across macOS, Linux, and Windows.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Public Loghub dataset metadata and CSV samples are normalized as text.
+*.csv text eol=lf
+CITATION text eol=lf
+LICENSE text eol=lf
+
+# Never apply line-ending conversion to generated media.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary

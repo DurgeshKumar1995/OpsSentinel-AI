@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Human-supervised AI incident response workspace">
+  <title>SafeOps · Incident Agent</title>
+  <link rel="stylesheet" href="/static/styles.css?v=5">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="SafeOps home">
+      <span class="brand-mark">S</span>
+      <span>SafeOps</span>
+    </a>
+    <div class="system-status"><span class="status-dot"></span> Agent online</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">AI INCIDENT RESPONSE</p>
+      <h1>Diagnose faster.<br><span>Act with control.</span></h1>
+      <p class="hero-copy">Describe what is happening. SafeOps checks evidence, explains its findings, and always asks before taking a risky action.</p>
+    </section>
+
+    <section class="workspace" aria-labelledby="incident-heading">
+      <div class="step-rail" aria-label="Incident workflow">
+        <div class="step active" data-step="1"><span>1</span><div><b>Report</b><small>Describe the issue</small></div></div>
+        <div class="line"></div>
+        <div class="step" data-step="2"><span>2</span><div><b>Investigate</b><small>Review evidence</small></div></div>
+        <div class="line"></div>
+        <div class="step" data-step="3"><span>3</span><div><b>Resolve</b><small>Approve and learn</small></div></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-label">NEW INCIDENT</p>
+            <h2 id="incident-heading">What needs attention?</h2>
+          </div>
+          <span class="privacy-note">Human-controlled actions</span>
+        </div>
+
+        <form id="incident-form">
+          <label for="incident-message">Incident details</label>
+          <textarea id="incident-message" required minlength="3" maxlength="2000" placeholder="Ask about a deployment, CI/CD pipeline, cloud service, monitoring alert, or production incident."></textarea>
+          <div class="examples" aria-label="Example incidents">
+            <button type="button" data-example="Check payment-gateway logs for the last 15 minutes.">Check payment logs</button>
+            <button type="button" data-example="The auth-service is returning 500 errors. Investigate and fix it.">Fix auth service</button>
+          </div>
+          <label class="visual-option">
+            <input type="checkbox" id="include-visual">
+            <span><b>Create an AI architecture image</b><small>Returns text first, then creates a supporting DevOps diagram.</small></span>
+          </label>
+          <button class="primary" type="submit" id="investigate-button">
+            <span>Start investigation</span><span aria-hidden="true">→</span>
+          </button>
+        </form>
+
+        <div id="progress" class="progress hidden" role="status" aria-live="polite">
+          <span class="spinner"></span>
+          <div><b>Agent is investigating</b><small>Checking current evidence and reviewed incident history…</small></div>
+        </div>
+
+        <section id="result" class="result hidden" aria-live="polite">
+          <div class="result-top">
+            <div class="result-title"><span id="result-icon">✓</span><div><small>AGENT RESULT</small><h3 id="result-status">Investigation complete</h3></div></div>
+            <div class="response-icon-actions" aria-label="Response actions">
+              <span id="response-action-status" class="response-action-status" role="status" aria-live="polite"></span>
+              <button type="button" class="icon-button copy-icon" id="copy-response" title="Copy response" aria-label="Copy response"><span aria-hidden="true"></span></button>
+              <button type="button" class="icon-button download-icon" id="download-response" title="Download response" aria-label="Download response"><span aria-hidden="true"></span></button>
+            </div>
+          </div>
+          <p id="result-message"></p>
+          <div id="usage-summary" class="usage-summary" aria-label="AI usage and estimated cost">
+            <div><small>MODEL</small><b id="usage-model">No AI call</b></div>
+            <div><small>INPUT TOKENS</small><b id="usage-input">0</b></div>
+            <div><small>OUTPUT TOKENS</small><b id="usage-output">0</b></div>
+            <div><small>ESTIMATED COST</small><b id="usage-cost">$0.000000</b></div>
+          </div>
+          <div id="answer-flow" class="answer-flow" aria-label="How this answer was produced">
+            <p class="flow-heading">HOW THIS ANSWER WAS PRODUCED</p>
+            <ol id="flow-steps"></ol>
+          </div>
+          <section id="generated-visual" class="generated-visual hidden" aria-live="polite">
+            <div class="visual-title"><div><small>AI-GENERATED VISUAL</small><h3>Architecture explanation</h3></div><div class="visual-title-actions"><span id="visual-model"></span><button type="button" class="icon-button hidden" id="download-image" title="Download image" aria-label="Download image">↓</button></div></div>
+            <div id="visual-loading" class="visual-loading"><span class="spinner"></span> Creating the supporting diagram…</div>
+            <img id="visual-image" class="hidden" alt="AI-generated DevOps architecture diagram supporting the response">
+            <p id="visual-error" class="visual-error hidden"></p>
+          </section>
+          <div id="approval-card" class="approval hidden">
+            <p class="warning-label">APPROVAL REQUIRED</p>
+            <h3>Restart service?</h3>
+            <dl id="action-details"></dl>
+            <p class="safety-note">Nothing will be changed unless you approve this action.</p>
+            <div class="action-buttons">
+              <button type="button" class="danger" id="approve-button">Approve restart</button>
+              <button type="button" class="secondary" id="deny-button">Deny action</button>
+            </div>
+          </div>
+          <button type="button" class="text-button" id="new-incident">＋ Start another incident</button>
+        </section>
+
+        <section id="feedback" class="feedback hidden">
+          <div><p class="section-label">HELP THE AGENT IMPROVE</p><h3>Was this resolution useful?</h3></div>
+          <form id="feedback-form">
+            <input id="feedback-service" aria-label="Service name" placeholder="Service name" required>
+            <textarea id="feedback-resolution" aria-label="Reviewed resolution" placeholder="What resolution worked?" required></textarea>
+            <div class="feedback-row">
+              <label>Rating <select id="feedback-rating"><option value="5">5 — Excellent</option><option value="4">4 — Helpful</option><option value="3">3 — Average</option><option value="2">2 — Poor</option><option value="1">1 — Incorrect</option></select></label>
+              <label class="checkbox"><input type="checkbox" id="feedback-approved"> Approved by operator</label>
+            </div>
+            <button class="secondary" type="submit">Save reviewed feedback</button>
+            <small id="feedback-status" role="status"></small>
+          </form>
+        </section>
+      </div>
+    </section>
+
+    <section class="how-it-works">
+      <p class="section-label">HOW IT WORKS</p>
+      <h2>Safe automation, by design.</h2>
+      <div class="feature-grid">
+        <article><span>01</span><h3>Evidence first</h3><p>The agent reads logs before recommending a remediation.</p></article>
+        <article><span>02</span><h3>Human control</h3><p>Risky actions pause until an operator explicitly approves them.</p></article>
+        <article><span>03</span><h3>Reviewed learning</h3><p>Only approved, highly rated outcomes guide future investigations.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer><span>SafeOps Incident Agent</span><span>Human-supervised · Evidence-led · Auditable</span></footer>
+  <script src="/static/app.js?v=6" defer></script>
+</body>
+</html>
