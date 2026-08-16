@@ -6,7 +6,7 @@ langgraph==1.2.11
 langgraph-checkpoint==4.2.0
 openai==2.54.0
 pydantic==2.13.4
-pydantic-settings==2.10.1
+pydantic-settings==2.15.0
 python-dotenv==1.2.2
 # Explicit security floor for FastAPI's web layer.
 starlette==1.3.1
