@@ -29,3 +29,5 @@ audit output in a pull request. New mutating tools must be allowlisted,
 schema-validated, idempotent, auditable, and protected by explicit human
 approval. Changes to prompts, routing, memory, or tool behavior should include
 evaluation cases demonstrating that safety and answer quality did not regress.
+Use [docs/TEST_PROMPTS.md](docs/TEST_PROMPTS.md) for manual validation examples and
+add deterministic automated coverage to `test_cases.py` for changed behavior.

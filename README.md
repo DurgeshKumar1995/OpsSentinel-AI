@@ -116,6 +116,10 @@ curl -H "X-Admin-Key: $USAGE_ADMIN_KEY" \
 python -m unittest discover -v -p 'test*.py'
 ```
 
+For copy-paste prompts covering diagnostics, architecture diagrams, learned memory,
+changed intent, human approval, scope rejection, and injection protection, see
+[Test prompts and expected results](docs/TEST_PROMPTS.md).
+
 ## Public dataset
 
 The project includes Loghub HDFS and BGL 2K samples with license/citation files.
