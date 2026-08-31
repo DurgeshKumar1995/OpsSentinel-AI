@@ -224,7 +224,9 @@ incidentForm.addEventListener('submit', async (event) => {
   $('#investigate-button').disabled = true;
   setStep(2);
   try {
-    const data = await request('/incidents', {method: 'POST', body: JSON.stringify({message: originalSymptom})});
+    const payload = {message: originalSymptom};
+    if (threadId) payload.thread_id = threadId;
+    const data = await request('/incidents', {method: 'POST', body: JSON.stringify(payload)});
     threadId = data.thread_id;
     renderResult(data);
     await generateVisual(data);

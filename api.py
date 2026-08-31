@@ -17,7 +17,7 @@ from config.settings import settings
 from graph.workflow import get_graph_builder
 from services.agent_logic import execute_tools
 from services.audit import AuditLogger
-from services.domain import OUT_OF_SCOPE_MESSAGE, is_devops_request
+from services.domain import OUT_OF_SCOPE_MESSAGE, is_devops_follow_up, is_devops_request
 from services.embeddings import create_embedder
 from services.local_reasoning import try_local_readonly_answer
 from services.memory import LearningStore, Lesson
@@ -134,6 +134,18 @@ def _contains_risky_action(state: dict) -> bool:
     )
 
 
+def _previous_user_messages(agent, thread_id: str) -> list[str]:
+    """Read prior user turns from the in-memory checkpoint for contextual scope checks."""
+    snapshot = agent.get_state(_config(thread_id))
+    if not snapshot.values:
+        return []
+    return [
+        str(message.content)
+        for message in snapshot.values.get("messages", [])
+        if getattr(message, "type", None) == "human"
+    ]
+
+
 app = FastAPI(
     title="SafeOps Incident Agent",
     version="1.0.0",
@@ -209,7 +221,11 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("answer", "Request safely blocked", "complete"),
             ),
         })
-    if not is_devops_request(payload.message):
+    previous_user_messages = (
+        _previous_user_messages(agent, thread_id) if payload.thread_id else []
+    )
+    contextual_follow_up = is_devops_follow_up(payload.message, previous_user_messages)
+    if not is_devops_request(payload.message) and not contextual_follow_up:
         audit.write("incident_blocked", thread_id=thread_id, reason="scope_guard")
         return _track(memory, payload.message, {
             "thread_id": thread_id,
@@ -224,9 +240,11 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("answer", "Scope guidance returned", "complete"),
             ),
         })
-    recalled = memory.recall_safe_response(payload.message)
+    # A referential follow-up must be answered from this thread's conversation,
+    # never from a standalone response cached for similar wording.
+    recalled = None if contextual_follow_up else memory.recall_safe_response(payload.message)
     if recalled is None:
-        recalled = memory.recall_similar_response(
+        recalled = None if contextual_follow_up else memory.recall_similar_response(
             payload.message, threshold=settings.semantic_memory_threshold
         )
     if recalled:
@@ -248,7 +266,7 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("answer", "Learned answer returned", "complete"),
             ),
         })
-    local_answer = try_local_readonly_answer(payload.message)
+    local_answer = None if contextual_follow_up else try_local_readonly_answer(payload.message)
     if local_answer:
         response = {
             "thread_id": thread_id,

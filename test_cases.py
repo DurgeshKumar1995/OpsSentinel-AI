@@ -26,6 +26,7 @@ import api
 from graph.workflow import get_graph_builder
 from models.schemas import RestartServiceInput
 from services.agent_logic import execute_tools
+from services.domain import is_devops_follow_up, is_devops_request
 from services.embeddings import LocalHashEmbedder
 from services.local_reasoning import try_local_readonly_answer
 from services.memory import LearningStore, Lesson
@@ -334,6 +335,49 @@ class SecurityTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RestartServiceInput(service_name="auth-service; rm -rf", reason="timeout detected")
 
+    def test_follow_up_requires_an_established_devops_thread(self):
+        self.assertTrue(
+            is_devops_follow_up(
+                "Please explain point no 2 in more detail",
+                ["Explain common DevOps issues"],
+            )
+        )
+        self.assertFalse(is_devops_follow_up("Please explain point 2", []))
+        self.assertFalse(
+            is_devops_follow_up("Please explain point 2", ["Give me a cake recipe"])
+        )
+        self.assertFalse(
+            is_devops_follow_up(
+                "Explain a chocolate cake recipe", ["Explain common DevOps issues"]
+            )
+        )
+        self.assertTrue(
+            is_devops_follow_up(
+                "Explain about Automation Tool in response",
+                ["Explain common DevOps issues", "Explain point 2"],
+            )
+        )
+
+    def test_common_devops_topics_are_in_scope(self):
+        requests = [
+            "Compare Chef and Puppet for configuration management",
+            "How does GitOps work with Argo CD?",
+            "Explain blue-green and canary strategies",
+            "What are SLO, SLI, and error budgets?",
+            "Troubleshoot an OpenTelemetry tracing gap",
+            "Describe secrets management with Vault",
+            "How does a Kubernetes StatefulSet work?",
+            "Explain infrastructure provisioning with Pulumi",
+            "Create a disaster recovery runbook",
+            "Investigate Kafka throughput bottlenecks",
+            "Explain some common issues in kubectl",
+            "Why does kubectl show CrashLoopBackOff?",
+            "Troubleshoot an invalid kubeconfig context",
+        ]
+        for request in requests:
+            with self.subTest(request=request):
+                self.assertTrue(is_devops_request(request))
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -359,6 +403,114 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["source"], "scope_guard")
         self.assertEqual(response.json()["flow"][1]["status"], "blocked")
         invoke.assert_not_called()
+
+    def test_kubectl_question_reaches_agent(self):
+        state = {
+            "messages": [AIMessage(content="Common kubectl issues include context, connectivity, and permissions.")]
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LearningStore(os.path.join(temp_dir, "kubectl-memory.db"))
+            with patch.object(self.client.app.state, "memory", store), patch.object(
+                self.client.app.state.agent, "invoke", return_value=state
+            ) as invoke:
+                response = self.client.post(
+                    "/incidents",
+                    json={"message": "Explain some common issues in kubectl"},
+                )
+
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertIn("kubectl issues", response.json()["message"])
+        invoke.assert_called_once()
+
+    def test_contextual_follow_up_uses_prior_devops_answer(self):
+        model = Mock()
+        model.invoke.side_effect = [
+            AIMessage(content="1. Integration challenges\n2. Cultural resistance"),
+            AIMessage(content="Point 2 means teams may resist process or tooling changes."),
+        ]
+        thread_id = "devops-follow-up"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LearningStore(os.path.join(temp_dir, "follow-up-memory.db"))
+            with patch.object(self.client.app.state, "memory", store), patch(
+                "services.agent_logic.llm_with_tools", model
+            ):
+                first = self.client.post(
+                    "/incidents",
+                    json={"message": "Explain common DevOps issues", "thread_id": thread_id},
+                )
+                second = self.client.post(
+                    "/incidents",
+                    json={"message": "Please explain point no 2 in more detail", "thread_id": thread_id},
+                )
+
+        self.assertEqual(first.json()["status"], "completed")
+        self.assertEqual(second.json()["status"], "completed")
+        self.assertIn("resist process", second.json()["message"])
+        second_call_messages = model.invoke.call_args_list[1].args[0]
+        self.assertTrue(
+            any(
+                getattr(message, "content", "") == "1. Integration challenges\n2. Cultural resistance"
+                for message in second_call_messages
+            )
+        )
+
+    def test_follow_up_without_devops_history_remains_out_of_scope(self):
+        response = self.client.post(
+            "/incidents",
+            json={"message": "Please explain point no 2", "thread_id": "unknown-thread"},
+        )
+        self.assertEqual(response.json()["status"], "out_of_scope")
+
+    def test_named_topic_follow_up_works_after_numbered_follow_up(self):
+        model = Mock()
+        model.invoke.side_effect = [
+            AIMessage(content="1. Monitoring gaps\n2. Configuration management"),
+            AIMessage(
+                content="Configuration management uses automation tools such as Ansible."
+            ),
+            AIMessage(
+                content="Automation tools apply repeatable configuration without manual steps."
+            ),
+        ]
+        thread_id = "multi-hop-devops-follow-up"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LearningStore(os.path.join(temp_dir, "multi-hop-memory.db"))
+            with patch.object(self.client.app.state, "memory", store), patch(
+                "services.agent_logic.llm_with_tools", model
+            ):
+                responses = [
+                    self.client.post(
+                        "/incidents",
+                        json={
+                            "message": "Explain some common DevOps issues",
+                            "thread_id": thread_id,
+                        },
+                    ),
+                    self.client.post(
+                        "/incidents",
+                        json={
+                            "message": "Explain point 2 in the response",
+                            "thread_id": thread_id,
+                        },
+                    ),
+                    self.client.post(
+                        "/incidents",
+                        json={
+                            "message": "Explain about Automation Tool in response",
+                            "thread_id": thread_id,
+                        },
+                    ),
+                ]
+
+        self.assertTrue(all(response.json()["status"] == "completed" for response in responses))
+        self.assertIn("repeatable configuration", responses[-1].json()["message"])
+        final_messages = model.invoke.call_args_list[2].args[0]
+        self.assertTrue(
+            any(
+                "Configuration management uses automation tools" in getattr(message, "content", "")
+                for message in final_messages
+            )
+        )
 
     def test_prompt_injection_is_blocked_without_calling_agent(self):
         with patch.object(self.client.app.state.agent, "invoke") as invoke:
