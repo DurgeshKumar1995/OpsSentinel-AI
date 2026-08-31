@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     model_input_price_per_million: float = Field(default=2.50, ge=0)
     model_output_price_per_million: float = Field(default=10.00, ge=0)
     max_input_chars: int = Field(default=2000, ge=100, le=20_000)
+    max_uploaded_log_chars: int = Field(default=100_000, ge=1_000, le=1_000_000)
     max_context_messages: int = Field(default=6, ge=2, le=50)
     max_agent_steps: int = Field(default=4, ge=2, le=20)
     rate_limit_requests: int = Field(default=20, ge=1, le=10_000)

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import settings
 from graph.workflow import get_graph_builder
-from services.agent_logic import execute_tools
+from services.agent_logic import analyze_uploaded_logs, execute_tools
 from services.audit import AuditLogger
 from services.domain import OUT_OF_SCOPE_MESSAGE, is_devops_follow_up, is_devops_request
 from services.embeddings import create_embedder
@@ -51,6 +51,13 @@ async def lifespan(application: FastAPI):
 
 class IncidentRequest(BaseModel):
     message: str = Field(min_length=3, max_length=settings.max_input_chars)
+    thread_id: str | None = Field(default=None, min_length=3, max_length=100)
+
+
+class UploadedLogRequest(BaseModel):
+    message: str = Field(min_length=3, max_length=settings.max_input_chars)
+    filename: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1, max_length=settings.max_uploaded_log_chars)
     thread_id: str | None = Field(default=None, min_length=3, max_length=100)
 
 
@@ -296,6 +303,61 @@ def create_incident(payload: IncidentRequest, request: Request):
     if response["status"] == "completed" and not _contains_risky_action(state):
         memory.remember_safe_response(payload.message, response["message"])
     audit.write("incident_result", thread_id=thread_id, status=response["status"], source="tools")
+    return _track(memory, payload.message, response)
+
+
+@app.post("/incidents/log-analysis")
+def analyze_log_file(payload: UploadedLogRequest, request: Request):
+    """Analyze a user-selected text log without storing the file or enabling actions."""
+    memory = request.app.state.memory
+    rate_limiter = request.app.state.rate_limiter
+    client_key = request.client.host if request.client else "unknown"
+    if not rate_limiter.allow(client_key):
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait and try again.")
+    filename = Path(payload.filename).name
+    if filename != payload.filename or Path(filename).suffix.lower() not in {".log", ".txt", ".json"}:
+        raise HTTPException(
+            status_code=400, detail="Upload a .log, .txt, or .json text file."
+        )
+    security = inspect_prompt(payload.message)
+    if not security.allowed:
+        raise HTTPException(status_code=400, detail=security.reason)
+    thread_id = payload.thread_id or str(uuid4())
+    safe_content = redact_secrets(payload.content.replace("\x00", ""))
+    result = analyze_uploaded_logs(
+        redact_secrets(payload.message), filename, safe_content
+    )
+    # Keep the operator request and safe analysis result for later follow-up
+    # questions, but do not retain the raw uploaded log in conversation memory.
+    request.app.state.agent.update_state(
+        _config(thread_id),
+        {
+            "messages": [("user", payload.message), result],
+            "hitl_approved": False,
+            "agent_steps": 0,
+        },
+    )
+    response = {
+        "thread_id": thread_id,
+        "status": "completed",
+        "message": getattr(result, "content", ""),
+        "pending_action": None,
+        "source": "uploaded_log",
+        "learned": False,
+        "usage": summarize_usage(
+            [result], settings.openai_model,
+            settings.model_input_price_per_million,
+            settings.model_output_price_per_million,
+        ),
+        "flow": _flow(
+            ("request", "Log file received", "complete"),
+            ("guard", "File type, size, and security checked", "complete"),
+            ("evidence", "Uploaded log evidence analyzed", "complete"),
+            ("actions", "Production actions disabled", "skipped"),
+            ("answer", "Findings and next steps returned", "complete"),
+        ),
+    }
+    audit.write("uploaded_log_analyzed", thread_id=thread_id, filename=filename)
     return _track(memory, payload.message, response)
 
 

@@ -422,6 +422,61 @@ class ApiTests(unittest.TestCase):
         self.assertIn("kubectl issues", response.json()["message"])
         invoke.assert_called_once()
 
+    def test_uploaded_log_is_redacted_and_analyzed_without_actions(self):
+        analysis = AIMessage(content="Finding: database connection timeout detected.")
+        with patch("api.analyze_uploaded_logs", return_value=analysis) as analyze:
+            response = self.client.post(
+                "/incidents/log-analysis",
+                json={
+                    "message": "Analyze this production log for errors",
+                    "filename": "orders.log",
+                    "content": "ERROR database timeout api_key=super-secret-value",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source"], "uploaded_log")
+        self.assertIsNone(response.json()["pending_action"])
+        self.assertIn("timeout", response.json()["message"])
+        self.assertNotIn("super-secret-value", analyze.call_args.args[2])
+
+    def test_uploaded_log_allows_generic_analysis_request(self):
+        analysis = AIMessage(content="Finding: no error was detected in the supplied lines.")
+        with patch("api.analyze_uploaded_logs", return_value=analysis):
+            response = self.client.post(
+                "/incidents/log-analysis",
+                json={
+                    "message": "Check there is any issue here",
+                    "filename": "table.log",
+                    "content": "2026-08-31 INFO application started successfully",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "completed")
+
+    def test_uploaded_log_rejects_unsupported_file_type(self):
+        response = self.client.post(
+            "/incidents/log-analysis",
+            json={
+                "message": "Analyze this production log",
+                "filename": "payload.exe",
+                "content": "ERROR failed",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_uploaded_log_rejects_path_like_filename(self):
+        response = self.client.post(
+            "/incidents/log-analysis",
+            json={
+                "message": "Analyze this production log",
+                "filename": "../orders.log",
+                "content": "ERROR failed",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+
     def test_contextual_follow_up_uses_prior_devops_answer(self):
         model = Mock()
         model.invoke.side_effect = [

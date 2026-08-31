@@ -5,6 +5,7 @@ const progress = $('#progress');
 const result = $('#result');
 const feedback = $('#feedback');
 const approvalCard = $('#approval-card');
+const logFileInput = $('#incident-log-file');
 let threadId = null;
 let originalSymptom = '';
 let latestAnswer = '';
@@ -226,12 +227,22 @@ incidentForm.addEventListener('submit', async (event) => {
   try {
     const payload = {message: originalSymptom};
     if (threadId) payload.thread_id = threadId;
-    const data = await request('/incidents', {method: 'POST', body: JSON.stringify(payload)});
+    const logFile = logFileInput.files[0];
+    let endpoint = '/incidents';
+    if (logFile) {
+      if (logFile.size === 0) throw new Error('The selected log file is empty.');
+      if (logFile.size > 100 * 1024) throw new Error('Log file must be 100 KB or smaller.');
+      if (!/\.(log|txt|json)$/i.test(logFile.name)) throw new Error('Upload a .log, .txt, or .json file.');
+      payload.filename = logFile.name;
+      payload.content = await logFile.text();
+      endpoint = '/incidents/log-analysis';
+    }
+    const data = await request(endpoint, {method: 'POST', body: JSON.stringify(payload)});
     threadId = data.thread_id;
     renderResult(data);
     await generateVisual(data);
   } catch (error) {
-    showError(`${error.message} Check that OPENAI_API_KEY is valid, then try again.`);
+    showError(error.message);
   } finally {
     $('#investigate-button').disabled = false;
   }
@@ -253,9 +264,27 @@ async function decide(approved) {
 $('#approve-button').addEventListener('click', () => decide(true));
 $('#deny-button').addEventListener('click', () => decide(false));
 $('#new-incident').addEventListener('click', () => {
-  threadId = null; originalSymptom = ''; messageInput.value = '';
+  threadId = null; originalSymptom = ''; messageInput.value = ''; logFileInput.value = ''; $('#log-file-status').textContent = '';
   result.classList.add('hidden'); feedback.classList.add('hidden'); approvalCard.classList.add('hidden'); $('#generated-visual').classList.add('hidden'); $('#download-image').classList.add('hidden'); $('#response-action-status').textContent = '';
   setStep(1); messageInput.focus();
+});
+
+logFileInput.addEventListener('change', () => {
+  const file = logFileInput.files[0];
+  const status = $('#log-file-status');
+  status.classList.remove('error');
+  if (!file) { status.textContent = ''; return; }
+  if (file.size === 0) {
+    status.textContent = 'The selected log file is empty.';
+    status.classList.add('error');
+    return;
+  }
+  if (file.size > 100 * 1024) {
+    status.textContent = 'File is too large. Choose a file up to 100 KB.';
+    status.classList.add('error');
+    return;
+  }
+  status.textContent = `${file.name} · ${(file.size / 1024).toFixed(1)} KB selected`;
 });
 
 $('#feedback-form').addEventListener('submit', async (event) => {

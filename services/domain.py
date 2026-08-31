@@ -63,7 +63,7 @@ DEVOPS_TERMS = {
 
     # Networking, data services, and security operations
     "network", "networking", "dns", "cdn", "proxy", "reverse proxy", "firewall",
-    "gateway", "api gateway", "load balancer", "vpc", "subnet", "routing", "tls",
+    "gateway", "api gateway", "vpc", "subnet", "routing", "tls",
     "ssl", "certificate", "secret management", "secrets management", "vault",
     "iam", "rbac", "least privilege", "supply chain security", "image scanning",
     "vulnerability scanning", "policy as code", "compliance", "database", "cache",
