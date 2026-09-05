@@ -41,15 +41,16 @@ customer data, proprietary logs, or other sensitive information.
 - Learned lessons are context, not commands, and must be verified against current logs.
 - Unit tests mock the language model and need neither Redis nor network access.
 
-This is a production-shaped starter, not a production-ready control plane. Replace
+This is a production-hardened starter, not a complete production control plane. Replace
 the mock tools with authenticated monitoring/orchestration adapters and add your
 organization's authorization, audit retention, rate limits, and secrets manager
 before connecting it to infrastructure.
 
-For multiple API workers or replicas, replace the in-process request limiter and
-MemorySaver with shared Redis-backed implementations. Add authentication/RBAC,
-TLS at the ingress, structured immutable audit logs, dependency/container scanning,
-and per-environment service allowlists before a real production connection.
+Conversation turns, approval state, and rate-limit events are stored in the configured
+database rather than process memory, so multiple workers on one shared filesystem remain
+consistent. For multi-host replicas, point the persistence interface at a managed SQL
+implementation. Add TLS at the ingress, immutable audit export, dependency/container
+scanning, and per-environment service allowlists before a real production connection.
 
 The application refuses to start with `APP_ENV=production` while `TOOL_MODE=mock`,
 preventing demonstration tools from being mistaken for real infrastructure adapters.
@@ -125,11 +126,17 @@ demo UI/API. Before calling the deployment production-ready, replace those compo
 with managed persistent services and return generated images from object storage.
 
 Usage history contains redacted prompts and is therefore admin-only. Configure a
-random value of at least 16 characters:
+random values for access and approval signing (approval signing requires at least 32 characters):
 
 ```env
 USAGE_ADMIN_KEY=replace-with-a-long-random-value
 OPERATOR_API_KEY=replace-with-a-different-long-random-value
+AUTH_MODE=api_key
+APPROVAL_SIGNING_SECRET=replace-with-at-least-32-random-characters
+SESSION_RETENTION_DAYS=30
+MONITORING_API_URL=https://monitoring.internal.example/v1/logs
+ORCHESTRATION_API_URL=https://orchestrator.internal.example/v1/restarts
+TOOL_API_TOKEN=replace-with-a-scoped-service-token
 ```
 
 Then request history with `X-Admin-Key`:
@@ -139,10 +146,22 @@ curl -H "X-Admin-Key: $USAGE_ADMIN_KEY" \
   "http://127.0.0.1:8000/usage?limit=50"
 ```
 
-`OPERATOR_API_KEY` authorizes reviewed feedback through `X-Operator-Key`. Approval
-of a pending infrastructure action additionally requires the capability returned for
-that exact thread and action; the web UI handles this capability automatically. Never
-expose either configured key in client-side source code.
+`OPERATOR_API_KEY` authenticates production incident, session, and approval requests
+through `X-Operator-Key`; the web UI keeps it in tab-scoped session storage. Approval
+also requires a signed capability for the exact thread and action. Pending actions are
+stored durably and claimed atomically, so retrying an approval cannot execute the same
+action twice. Session summaries are redacted, owner-scoped, and retained according to
+`SESSION_RETENTION_DAYS`. Never embed configured keys in client-side source code.
+
+For enterprise identity, set `AUTH_MODE=oidc_proxy` and configure
+`OIDC_PROXY_SECRET`. A trusted OIDC-aware ingress must validate issuer, audience,
+signature, expiry, and MFA policy, then inject `X-Authenticated-User`,
+`X-User-Roles`, and `X-OIDC-Proxy-Secret`. Supported roles are `investigator`,
+`approver`, and `admin`; only approvers and administrators can execute actions.
+
+Live tool mode uses authenticated JSON APIs. Log retrieval sends a GET request with
+`service` and `window_minutes`; restarts send a POST body containing `service_name`
+and `reason`, plus an `Idempotency-Key` header containing the durable action ID.
 
 ## Test
 

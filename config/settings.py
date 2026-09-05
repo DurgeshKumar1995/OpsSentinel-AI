@@ -41,7 +41,15 @@ class Settings(BaseSettings):
     )
     usage_admin_key: str | None = Field(default=None, repr=False)
     operator_api_key: str | None = Field(default=None, repr=False)
+    auth_mode: Literal["api_key", "oidc_proxy"] = "api_key"
+    oidc_proxy_secret: str | None = Field(default=None, repr=False)
+    approval_signing_secret: str | None = Field(default=None, repr=False)
+    session_retention_days: int = Field(default=30, ge=1, le=365)
     tool_mode: Literal["mock", "live"] = "mock"
+    monitoring_api_url: str | None = None
+    orchestration_api_url: str | None = None
+    tool_api_token: str | None = Field(default=None, repr=False)
+    tool_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     allowed_services: str = "auth-service,payment-gateway"
     embedding_provider: Literal["local", "openai"] = "local"
     embedding_model: str = "text-embedding-3-small"
@@ -62,7 +70,10 @@ class Settings(BaseSettings):
     def service_allowlist(self) -> set[str]:
         return {item.strip() for item in self.allowed_services.split(",") if item.strip()}
 
-    @field_validator("usage_admin_key", "operator_api_key", mode="before")
+    @field_validator(
+        "usage_admin_key", "operator_api_key", "approval_signing_secret",
+        "oidc_proxy_secret", "tool_api_token", mode="before"
+    )
     @classmethod
     def normalize_optional_secret(cls, value):
         if isinstance(value, str) and not value.strip():
@@ -75,14 +86,28 @@ class Settings(BaseSettings):
             raise ValueError("USAGE_ADMIN_KEY must contain at least 16 characters")
         if self.operator_api_key and len(self.operator_api_key) < 16:
             raise ValueError("OPERATOR_API_KEY must contain at least 16 characters")
+        if self.approval_signing_secret and len(self.approval_signing_secret) < 32:
+            raise ValueError("APPROVAL_SIGNING_SECRET must contain at least 32 characters")
+        if self.oidc_proxy_secret and len(self.oidc_proxy_secret) < 24:
+            raise ValueError("OIDC_PROXY_SECRET must contain at least 24 characters")
         if self.app_env == "production" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required in production")
         if self.app_env == "production" and self.tool_mode == "mock":
             raise ValueError("TOOL_MODE=mock is forbidden in production")
         if self.app_env == "production" and not self.usage_admin_key:
             raise ValueError("USAGE_ADMIN_KEY is required in production")
-        if self.app_env == "production" and not self.operator_api_key:
-            raise ValueError("OPERATOR_API_KEY is required in production")
+        if self.app_env == "production" and self.auth_mode == "api_key" and not self.operator_api_key:
+            raise ValueError("OPERATOR_API_KEY is required for production api_key authentication")
+        if self.app_env == "production" and self.auth_mode == "oidc_proxy" and not self.oidc_proxy_secret:
+            raise ValueError("OIDC_PROXY_SECRET is required for production oidc_proxy authentication")
+        if self.app_env == "production" and not self.approval_signing_secret:
+            raise ValueError("APPROVAL_SIGNING_SECRET is required in production")
+        if self.app_env == "production" and (
+            not self.monitoring_api_url or not self.orchestration_api_url or not self.tool_api_token
+        ):
+            raise ValueError(
+                "MONITORING_API_URL, ORCHESTRATION_API_URL, and TOOL_API_TOKEN are required in production"
+            )
         if self.embedding_provider == "openai" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for EMBEDDING_PROVIDER=openai")
         return self

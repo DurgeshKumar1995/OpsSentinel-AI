@@ -154,7 +154,7 @@ def execute_tools(state: IncidentState):
                     res = restart_service(**validated.model_dump())
                 else:
                     res = {"error": "Unknown tool"}
-            except (ValueError, TypeError, NotImplementedError) as error:
+            except (ValueError, TypeError, RuntimeError, OSError, TimeoutError) as error:
                 res = {"error": f"Tool execution rejected: {error}"}
 
             tool_outputs.append(ToolMessage(content=json.dumps(res), tool_call_id=call["id"]))

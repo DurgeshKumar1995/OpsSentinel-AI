@@ -7,7 +7,7 @@ import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from config.settings import settings
@@ -50,7 +50,10 @@ class LearningStore:
         self._setup()
 
     def _connect(self):
-        return sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, timeout=10)
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 10000")
+        return connection
 
     def _setup(self):
         with closing(self._connect()) as connection:
@@ -117,6 +120,234 @@ class LearningStore:
                     )
                     """
                 )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_actions (
+                        action_id TEXT PRIMARY KEY,
+                        thread_id TEXT NOT NULL,
+                        owner_id TEXT NOT NULL,
+                        action_name TEXT NOT NULL,
+                        action_args TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (
+                            status IN ('pending', 'executing', 'completed', 'failed', 'denied')
+                        ),
+                        result TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_actions_thread ON pending_actions(thread_id)"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS incident_sessions (
+                        thread_id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        last_query TEXT NOT NULL,
+                        last_response TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_owner ON incident_sessions(owner_id, updated_at)"
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS session_turns (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        thread_id TEXT NOT NULL,
+                        owner_id TEXT NOT NULL,
+                        query TEXT NOT NULL,
+                        response TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )"""
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_turns_thread ON session_turns(thread_id, owner_id, id)"
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS rate_limit_events (
+                        identity TEXT NOT NULL,
+                        scope TEXT NOT NULL,
+                        occurred_at REAL NOT NULL
+                    )"""
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rate_events ON rate_limit_events(identity, scope, occurred_at)"
+                )
+
+    def register_action(self, thread_id: str, owner_id: str, action: dict) -> dict:
+        """Persist an approval-gated action before exposing it to an operator."""
+        now = datetime.now(UTC).isoformat()
+        action_id = str(action.get("id") or f"action-{thread_id}")
+        with closing(self._connect()) as connection:
+            with connection:
+                connection.execute(
+                    """INSERT INTO pending_actions
+                       (action_id, thread_id, owner_id, action_name, action_args, status,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                       ON CONFLICT(action_id) DO NOTHING""",
+                    (action_id, thread_id, owner_id, action["name"],
+                     json.dumps(action.get("args", {}), sort_keys=True), now, now),
+                )
+        return self.get_action(action_id, owner_id)
+
+    def get_action(self, action_id: str, owner_id: str) -> dict | None:
+        with closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM pending_actions WHERE action_id = ? AND owner_id = ?",
+                (action_id, owner_id),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["action_args"] = json.loads(value["action_args"])
+        value["result"] = json.loads(value["result"]) if value["result"] else None
+        return value
+
+    def claim_action(self, action_id: str, owner_id: str) -> bool:
+        """Atomically acquire the one permitted execution of an approved action."""
+        with closing(self._connect()) as connection:
+            with connection:
+                cursor = connection.execute(
+                    """UPDATE pending_actions SET status = 'executing', updated_at = ?
+                       WHERE action_id = ? AND owner_id = ? AND status = 'pending'""",
+                    (datetime.now(UTC).isoformat(), action_id, owner_id),
+                )
+                return cursor.rowcount == 1
+
+    def finish_action(self, action_id: str, owner_id: str, status: str, result: dict) -> None:
+        if status not in {"completed", "failed", "denied"}:
+            raise ValueError("invalid final action status")
+        with closing(self._connect()) as connection:
+            with connection:
+                connection.execute(
+                    """UPDATE pending_actions SET status = ?, result = ?, updated_at = ?
+                       WHERE action_id = ? AND owner_id = ?""",
+                    (status, json.dumps(result, sort_keys=True), datetime.now(UTC).isoformat(),
+                     action_id, owner_id),
+                )
+
+    def record_session(self, owner_id: str, query: str, response: dict) -> None:
+        """Store a redacted server-side session summary scoped to its owner."""
+        now = datetime.now(UTC).isoformat()
+        title = " ".join(query.strip().split())[:90] or "Untitled incident"
+        with closing(self._connect()) as connection:
+            with connection:
+                connection.execute(
+                    """INSERT INTO incident_sessions
+                       (thread_id, owner_id, title, last_query, last_response, status,
+                        source, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(thread_id) DO UPDATE SET
+                         last_query = excluded.last_query,
+                         last_response = excluded.last_response,
+                         status = excluded.status,
+                         source = excluded.source,
+                         updated_at = excluded.updated_at
+                       WHERE incident_sessions.owner_id = excluded.owner_id""",
+                    (response["thread_id"], owner_id, title, query.strip(),
+                     str(response.get("message", "")), response.get("status", "completed"),
+                     response.get("source", "workflow"), now, now),
+                )
+                connection.execute(
+                    """INSERT INTO session_turns
+                       (thread_id, owner_id, query, response, status, source, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (response["thread_id"], owner_id, query.strip(),
+                     str(response.get("message", "")), response.get("status", "completed"),
+                     response.get("source", "workflow"), now),
+                )
+
+    def list_sessions(self, owner_id: str, limit: int = 30) -> list[dict]:
+        with closing(self._connect()) as connection:
+            cutoff = (datetime.now(UTC) - timedelta(days=settings.session_retention_days)).isoformat()
+            with connection:
+                connection.execute("DELETE FROM incident_sessions WHERE updated_at < ?", (cutoff,))
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """SELECT thread_id, title, last_query, last_response, status, source, updated_at
+                   FROM incident_sessions WHERE owner_id = ?
+                   ORDER BY updated_at DESC LIMIT ?""",
+                (owner_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def session_context(
+        self, thread_id: str, owner_id: str, limit: int = 6
+    ) -> list[tuple[str, str]]:
+        """Return ordered redacted turns to restore context after a process restart."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT query, response FROM (
+                       SELECT id, query, response FROM session_turns
+                       WHERE thread_id = ? AND owner_id = ? ORDER BY id DESC LIMIT ?
+                   ) ORDER BY id""",
+                (thread_id, owner_id, limit),
+            ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+    def session_turns(self, thread_id: str, owner_id: str, limit: int = 30) -> list[dict]:
+        with closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """SELECT query, response, status, source, created_at FROM (
+                       SELECT id, query, response, status, source, created_at
+                       FROM session_turns WHERE thread_id = ? AND owner_id = ?
+                       ORDER BY id DESC LIMIT ?
+                   ) ORDER BY id""",
+                (thread_id, owner_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_action(self, thread_id: str, owner_id: str) -> dict | None:
+        with closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """SELECT * FROM pending_actions WHERE thread_id = ? AND owner_id = ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (thread_id, owner_id),
+            ).fetchone()
+        if not row:
+            return None
+        value = dict(row)
+        value["action_args"] = json.loads(value["action_args"])
+        value["result"] = json.loads(value["result"]) if value["result"] else None
+        return value
+
+    def allow_request(
+        self, identity: str, scope: str, requests: int, window_seconds: int
+    ) -> bool:
+        """Enforce a cross-worker sliding window using the shared application database."""
+        now = datetime.now(UTC).timestamp()
+        cutoff = now - window_seconds
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM rate_limit_events WHERE occurred_at <= ?", (cutoff,))
+            count = connection.execute(
+                """SELECT COUNT(*) FROM rate_limit_events
+                   WHERE identity = ? AND scope = ? AND occurred_at > ?""",
+                (identity, scope, cutoff),
+            ).fetchone()[0]
+            if count >= requests:
+                connection.commit()
+                return False
+            connection.execute(
+                "INSERT INTO rate_limit_events(identity, scope, occurred_at) VALUES (?, ?, ?)",
+                (identity, scope, now),
+            )
+            connection.commit()
+        return True
 
     @staticmethod
     def _normalize_query(query: str) -> str:

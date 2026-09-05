@@ -11,7 +11,9 @@ import json
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
+from uuid import uuid4
 
 # Keep unit tests hermetic even when tracing is enabled in the developer shell.
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
@@ -28,12 +30,14 @@ from graph.workflow import get_graph_builder
 from models.schemas import RestartServiceInput
 from scripts.index_dataset import DEVOPS_DATASET, document_content
 from scripts.prepare_loghub_dataset import SOURCES
+from services import tools as operational_tools
 from services.agent_logic import call_agent, execute_tools
 from services.domain import (
     is_devops_follow_up,
     is_devops_request,
     is_project_improvement_request,
     is_project_info_request,
+    project_info_follow_up_step,
 )
 from services.embeddings import LocalHashEmbedder
 from services.local_reasoning import try_local_readonly_answer
@@ -448,6 +452,18 @@ class SecurityTests(unittest.TestCase):
         self.assertTrue(is_project_info_request("Provide the steps to use this project"))
         self.assertFalse(is_project_info_request("Explain a Kubernetes deployment"))
 
+    def test_project_guide_step_requires_project_session_context(self):
+        self.assertEqual(
+            project_info_follow_up_step("explain step 3", ["how to use you"]), 3
+        )
+        self.assertEqual(
+            project_info_follow_up_step("explain 3rd step", ["how to use you"]), 3
+        )
+        self.assertIsNone(project_info_follow_up_step("explain step 3", []))
+        self.assertIsNone(
+            project_info_follow_up_step("explain step 9", ["how to use this project"])
+        )
+
     def test_project_improvement_requests_are_recognized(self):
         self.assertTrue(is_project_improvement_request("what will help this project"))
         self.assertTrue(is_project_improvement_request("How can we improve this app?"))
@@ -491,6 +507,30 @@ class ApiTests(unittest.TestCase):
         self.assertIn("How to use this project", payload["message"])
         self.assertIn("Overall flow:", payload["message"])
         self.assertEqual(payload["usage"]["input_tokens"], 0)
+        invoke.assert_not_called()
+
+    def test_project_guide_numbered_follow_up_uses_same_session(self):
+        first = self.client.post("/incidents", json={"message": "how to use you"})
+        with patch.object(self.client.app.state.agent, "invoke") as invoke:
+            follow_up = self.client.post(
+                "/incidents",
+                json={"message": "explain step 3", "thread_id": first.json()["thread_id"]},
+            )
+        self.assertEqual(follow_up.status_code, 200)
+        self.assertEqual(follow_up.json()["source"], "project_info_follow_up")
+        self.assertIn("Step 3 — Choose a visual", follow_up.json()["message"])
+        invoke.assert_not_called()
+
+    def test_project_guide_ordinal_follow_up_uses_same_session(self):
+        first = self.client.post("/incidents", json={"message": "how to use you"})
+        with patch.object(self.client.app.state.agent, "invoke") as invoke:
+            follow_up = self.client.post(
+                "/incidents",
+                json={"message": "explain 3rd step", "thread_id": first.json()["thread_id"]},
+            )
+        self.assertEqual(follow_up.status_code, 200)
+        self.assertEqual(follow_up.json()["source"], "project_info_follow_up")
+        self.assertIn("Step 3 — Choose a visual", follow_up.json()["message"])
         invoke.assert_not_called()
 
     def test_project_improvement_returns_priorities_without_ai(self):
@@ -742,10 +782,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn("OPS WORKSPACE", response.text)
         self.assertIn('id="message-count"', response.text)
         self.assertIn("Model and token details", response.text)
-        self.assertIn("styles.css?v=16", response.text)
+        self.assertIn("styles.css?v=18", response.text)
         self.assertIn("Rate this resolution", response.text)
         self.assertIn('id="operator-key-field"', response.text)
         self.assertIn('id="session-list"', response.text)
+        self.assertIn('id="active-session-context"', response.text)
         self.assertIn('id="response-empty"', response.text)
         self.assertIn('class="workbench-grid"', response.text)
         self.assertIn("From signal to safe action.", response.text)
@@ -847,15 +888,16 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(accepted.json()["learned"])
 
     def test_approval_requires_capability_bound_to_pending_action(self):
-        thread_id = "capability-protected-restart"
+        thread_id = f"capability-protected-restart-{uuid4()}"
         pending = tool_call(
             "restart_service",
             {"service_name": "auth-service", "reason": "Service is frozen"},
-            "restart-capability",
+            f"restart-capability-{uuid4()}",
         )
-        self.client.app.state.agent.update_state(
-            api._config(thread_id),
-            {"messages": [("user", "Investigate auth-service"), pending]},
+        self.client.app.state.memory.register_action(
+            thread_id,
+            api.Principal("development-operator", frozenset({"admin"}), "development").owner_id,
+            pending.tool_calls[0],
         )
         rejected = self.client.post(
             f"/incidents/{thread_id}/approval",
@@ -897,6 +939,132 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(denied.status_code, 200)
         self.assertEqual(denied.json()["status"], "denied")
+
+    def test_approved_restart_is_idempotent_across_retries(self):
+        message = (
+            "The auth-service is failing in production. Propose restarting the auth-service "
+            "production deployment and wait for my approval."
+        )
+        proposal = self.client.post("/incidents", json={"message": message}).json()
+        with patch("api.restart_service", wraps=api.restart_service) as execute:
+            first = self.client.post(
+                f'/incidents/{proposal["thread_id"]}/approval',
+                json={"approved": True, "approval_token": proposal["approval_token"]},
+            )
+            retry = self.client.post(
+                f'/incidents/{proposal["thread_id"]}/approval',
+                json={"approved": True, "approval_token": proposal["approval_token"]},
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(first.json(), retry.json())
+        execute.assert_called_once()
+
+    def test_server_sessions_are_listed_for_the_current_operator(self):
+        response = self.client.post(
+            "/incidents", json={"message": "Check auth-service health status"}
+        )
+        sessions = self.client.get("/sessions")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sessions.status_code, 200)
+        self.assertTrue(any(
+            item["thread_id"] == response.json()["thread_id"]
+            for item in sessions.json()["sessions"]
+        ))
+
+    def test_repeated_proposals_in_one_session_have_unique_action_ids(self):
+        message = "The auth-service is failing in production. Propose restarting auth-service."
+        first = self.client.post("/incidents", json={"message": message}).json()
+        second = self.client.post(
+            "/incidents", json={"message": message, "thread_id": first["thread_id"]}
+        ).json()
+        self.assertNotEqual(first["pending_action"]["id"], second["pending_action"]["id"])
+        self.assertNotEqual(first["approval_token"], second["approval_token"])
+
+    def test_approval_survives_loss_of_graph_runtime_state(self):
+        proposal = self.client.post(
+            "/incidents",
+            json={"message": "The auth-service is frozen in production. Propose restarting auth-service."},
+        ).json()
+        with patch.object(self.client.app.state, "agent", Mock()):
+            approved = self.client.post(
+                f'/incidents/{proposal["thread_id"]}/approval',
+                json={"approved": True, "approval_token": proposal["approval_token"]},
+            )
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["status"], "completed")
+
+    def test_oidc_proxy_viewer_cannot_create_incident(self):
+        headers = {
+            "X-OIDC-Proxy-Secret": "trusted-proxy-secret-123456",
+            "X-Authenticated-User": "viewer@example.test",
+            "X-User-Roles": "viewer",
+        }
+        with patch.object(api.settings, "app_env", "production"), patch.object(
+            api.settings, "auth_mode", "oidc_proxy"
+        ), patch.object(api.settings, "oidc_proxy_secret", "trusted-proxy-secret-123456"):
+            response = self.client.post(
+                "/incidents", headers=headers,
+                json={"message": "Check auth-service health status"},
+            )
+        self.assertEqual(response.status_code, 403)
+
+    def test_accessibility_landmarks_and_approval_labels_are_present(self):
+        html = self.client.get("/").text
+        self.assertIn('aria-live="polite"', html)
+        self.assertIn('aria-label="Incident workflow"', html)
+        self.assertIn('HUMAN DECISION REQUIRED', html)
+        self.assertIn('id="operator-dialog"', html)
+
+    def test_only_one_worker_can_claim_an_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LearningStore(os.path.join(temp_dir, "coordination.db"))
+            action = {"id": "action-1", "name": "restart_service", "args": {}}
+            store.register_action("thread-1", "owner-1", action)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: store.claim_action("action-1", "owner-1"), range(8)))
+        self.assertEqual(results.count(True), 1)
+
+    def test_complete_session_history_is_preserved_in_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LearningStore(os.path.join(temp_dir, "sessions.db"))
+            store.record_session("owner", "first request", {
+                "thread_id": "thread", "message": "first answer", "status": "completed"
+            })
+            store.record_session("owner", "second request", {
+                "thread_id": "thread", "message": "second answer", "status": "completed"
+            })
+            turns = store.session_context("thread", "owner")
+        self.assertEqual(turns, [
+            ("first request", "first answer"), ("second request", "second answer")
+        ])
+
+    def test_shared_rate_limit_is_atomic(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LearningStore(os.path.join(temp_dir, "limits.db"))
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(
+                    lambda _: store.allow_request("owner", "visuals", 3, 60), range(8)
+                ))
+        self.assertEqual(results.count(True), 3)
+
+    def test_live_restart_adapter_sends_downstream_idempotency_key(self):
+        response = Mock()
+        response.status = 200
+        response.read.return_value = b'{"status":"SUCCESS"}'
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with patch.object(operational_tools.settings, "tool_mode", "live"), patch.object(
+            operational_tools.settings, "orchestration_api_url", "https://ops.example/restarts"
+        ), patch.object(operational_tools.settings, "tool_api_token", "scoped-token"), patch(
+            "services.tools.urlopen", return_value=response
+        ) as open_url:
+            result = operational_tools.restart_service(
+                "auth-service", "Service is frozen", request_id="action-123"
+            )
+        sent_request = open_url.call_args.args[0]
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(sent_request.get_header("Idempotency-key"), "action-123")
 
     def test_model_generated_answer_is_not_automatically_cached(self):
         with tempfile.TemporaryDirectory() as temp_dir:

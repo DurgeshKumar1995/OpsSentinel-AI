@@ -14,14 +14,14 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage
-from langgraph.checkpoint.memory import MemorySaver
 from openai import OpenAIError
 from pydantic import BaseModel, Field
 
 from config.settings import settings
 from graph.workflow import get_graph_builder
-from services.agent_logic import analyze_uploaded_logs, execute_tools
+from services.agent_logic import analyze_uploaded_logs
 from services.audit import AuditLogger
+from services.auth import Principal, principal_from_request, require_role
 from services.domain import (
     OUT_OF_SCOPE_MESSAGE,
     PROJECT_IMPROVEMENT_MESSAGE,
@@ -30,13 +30,15 @@ from services.domain import (
     is_devops_request,
     is_project_improvement_request,
     is_project_info_request,
+    project_guide_step_message,
+    project_info_follow_up_step,
     requested_restart_action,
 )
 from services.embeddings import create_embedder
 from services.local_reasoning import try_local_readonly_answer
 from services.memory import LearningStore, Lesson
-from services.rate_limit import RateLimiter
 from services.security import inspect_prompt, redact_secrets
+from services.tools import restart_service
 from services.usage import summarize_usage, zero_usage
 from services.visuals import VisualGenerator
 
@@ -51,12 +53,9 @@ async def lifespan(application: FastAPI):
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    application.state.agent = get_graph_builder().compile(checkpointer=MemorySaver())
+    application.state.agent = get_graph_builder().compile()
     application.state.embedder = create_embedder(settings)
     application.state.memory = LearningStore(embedder=application.state.embedder)
-    application.state.rate_limiter = RateLimiter(
-        settings.rate_limit_requests, settings.rate_limit_window_seconds
-    )
     application.state.visual_generator = VisualGenerator(settings)
     logger.info("application_started env=%s tool_mode=%s", settings.app_env, settings.tool_mode)
     yield
@@ -97,13 +96,20 @@ def _config(thread_id: str):
     return {"configurable": {"thread_id": thread_id}}
 
 
-APPROVAL_SECRET = secrets.token_bytes(32)
+APPROVAL_SECRET = (
+    settings.approval_signing_secret.encode("utf-8")
+    if settings.approval_signing_secret
+    else secrets.token_bytes(32)
+)
 
 
 def _approval_token(thread_id: str, action: dict) -> str:
     """Bind a capability token to one exact pending action and incident thread."""
     payload = json.dumps(
-        {"thread_id": thread_id, "name": action.get("name"), "args": action.get("args", {})},
+        {
+            "thread_id": thread_id, "id": action.get("id"),
+            "name": action.get("name"), "args": action.get("args", {}),
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -153,13 +159,21 @@ def _response(thread_id: str, state: dict) -> dict:
     }
 
 
-def _track(memory: LearningStore, query: str, response: dict) -> dict:
+def _track(
+    memory: LearningStore, query: str, response: dict, owner_id: str | None = None
+) -> dict:
     """Attach zero usage when no model ran and persist the request total."""
     response.setdefault("usage", zero_usage())
     memory.record_usage(
         response["thread_id"], redact_secrets(query),
         response.get("source", "workflow"), response["usage"]
     )
+    effective_owner = owner_id or (
+        hashlib.sha256(settings.operator_api_key.encode("utf-8")).hexdigest()
+        if settings.app_env == "production" and settings.operator_api_key
+        else "development-operator"
+    )
+    memory.record_session(effective_owner, redact_secrets(query), response)
     return response
 
 
@@ -171,16 +185,13 @@ def _contains_risky_action(state: dict) -> bool:
     )
 
 
-def _previous_user_messages(agent, thread_id: str) -> list[str]:
-    """Read prior user turns from the in-memory checkpoint for contextual scope checks."""
-    snapshot = agent.get_state(_config(thread_id))
-    if not snapshot.values:
-        return []
-    return [
-        str(message.content)
-        for message in snapshot.values.get("messages", [])
-        if getattr(message, "type", None) == "human"
-    ]
+def _rate_limit(memory: LearningStore, principal: Principal, scope: str) -> None:
+    if settings.app_env != "production":
+        return
+    if not memory.allow_request(
+        principal.owner_id, scope, settings.rate_limit_requests, settings.rate_limit_window_seconds
+    ):
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait and try again.")
 
 
 app = FastAPI(
@@ -213,8 +224,10 @@ def health():
 
 
 @app.get("/generated/{filename}", include_in_schema=False)
-def generated_image(filename: str):
+def generated_image(filename: str, request: Request):
     """Serve an image from the configured output directory without allowing traversal."""
+    principal = principal_from_request(request)
+    require_role(principal, "investigator", "approver", "admin")
     if not filename.startswith("devops-visual-") or not filename.endswith(".png"):
         raise HTTPException(status_code=404, detail="Image not found")
     image_path = settings.generated_image_dir / filename
@@ -229,19 +242,32 @@ def readiness(request: Request):
         request.app.state.memory.relevant("readiness", limit=1)
     except OSError as error:
         raise HTTPException(status_code=503, detail="Persistence unavailable") from error
-    return {"status": "ready"}
+    checks = {"persistence": "ready", "tool_mode": settings.tool_mode}
+    if settings.app_env == "production":
+        checks["monitoring_adapter"] = "configured" if settings.monitoring_api_url else "missing"
+        checks["orchestration_adapter"] = "configured" if settings.orchestration_api_url else "missing"
+        if "missing" in checks.values():
+            raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
+    return {"status": "ready", "checks": checks}
 
 
 @app.post("/incidents")
-def create_incident(payload: IncidentRequest, request: Request):
+def create_incident(
+    payload: IncidentRequest,
+    request: Request,
+):
     agent = request.app.state.agent
     memory = request.app.state.memory
-    rate_limiter = request.app.state.rate_limiter
+    principal = principal_from_request(request)
+    require_role(principal, "investigator", "approver", "admin")
+    owner_id = principal.owner_id
+    _rate_limit(memory, principal, "incidents")
     client_key = request.client.host if request.client else "unknown"
-    if not rate_limiter.allow(client_key):
-        raise HTTPException(status_code=429, detail="Too many requests. Please wait and try again.")
     thread_id = payload.thread_id or str(uuid4())
-    audit.write("incident_received", thread_id=thread_id, client=client_key)
+    audit.write(
+        "incident_received", thread_id=thread_id, client=client_key,
+        actor=principal.subject, auth_method=principal.auth_method,
+    )
     security = inspect_prompt(payload.message)
     if not security.allowed:
         audit.write("incident_blocked", thread_id=thread_id, reason="security_guard")
@@ -257,7 +283,7 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("guard", "Prompt-injection security check", "blocked"),
                 ("answer", "Request safely blocked", "complete"),
             ),
-        })
+        }, owner_id)
     if is_project_improvement_request(payload.message):
         audit.write("incident_completed", thread_id=thread_id, source="project_improvement")
         return _track(memory, payload.message, {
@@ -275,7 +301,7 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("ai", "External AI call skipped", "skipped"),
                 ("answer", "Prioritized improvements returned", "complete"),
             ),
-        })
+        }, owner_id)
     if is_project_info_request(payload.message):
         audit.write("incident_completed", thread_id=thread_id, source="project_info")
         return _track(memory, payload.message, {
@@ -293,10 +319,33 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("ai", "External AI call skipped", "skipped"),
                 ("answer", "Project overview and usage returned", "complete"),
             ),
-        })
+        }, owner_id)
     previous_user_messages = (
-        _previous_user_messages(agent, thread_id) if payload.thread_id else []
+        [turn[0] for turn in memory.session_context(thread_id, owner_id)]
+        if payload.thread_id else []
     )
+    guide_step = project_info_follow_up_step(payload.message, previous_user_messages)
+    if guide_step:
+        audit.write(
+            "incident_completed", thread_id=thread_id, source="project_info_follow_up",
+            guide_step=guide_step, actor=principal.subject,
+        )
+        return _track(memory, payload.message, {
+            "thread_id": thread_id,
+            "status": "completed",
+            "message": project_guide_step_message(guide_step),
+            "pending_action": None,
+            "source": "project_info_follow_up",
+            "learned": False,
+            "usage": zero_usage(),
+            "flow": _flow(
+                ("request", "Follow-up received", "complete"),
+                ("context", "Project guide session restored", "complete"),
+                ("route", f"Guide step {guide_step} selected", "complete"),
+                ("ai", "External AI call skipped", "skipped"),
+                ("answer", "Step explanation returned", "complete"),
+            ),
+        }, owner_id)
     contextual_follow_up = is_devops_follow_up(payload.message, previous_user_messages)
     if not is_devops_request(payload.message) and not contextual_follow_up:
         audit.write("incident_blocked", thread_id=thread_id, reason="scope_guard")
@@ -312,7 +361,7 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("guard", "DevOps scope check", "blocked"),
                 ("answer", "Scope guidance returned", "complete"),
             ),
-        })
+        }, owner_id)
     requested_action = requested_restart_action(payload.message)
     if requested_action:
         pending_message = AIMessage(
@@ -323,7 +372,7 @@ def create_incident(payload: IncidentRequest, request: Request):
             tool_calls=[{
                 "name": "restart_service",
                 "args": requested_action,
-                "id": f"restart-{thread_id}",
+                "id": f"restart-{uuid4()}",
                 "type": "tool_call",
             }],
         )
@@ -332,11 +381,14 @@ def create_incident(payload: IncidentRequest, request: Request):
             "hitl_approved": False,
             "agent_steps": 1,
         }
-        agent.update_state(_config(thread_id), state)
         response = _response(thread_id, state)
         response["source"] = "human_approval_gate"
-        audit.write("action_approval_requested", thread_id=thread_id, **requested_action)
-        return _track(memory, payload.message, response)
+        memory.register_action(thread_id, owner_id, response["pending_action"])
+        audit.write(
+            "action_approval_requested", thread_id=thread_id, action_id=pending_message.tool_calls[0]["id"],
+            actor=principal.subject, auth_method=principal.auth_method, **requested_action,
+        )
+        return _track(memory, payload.message, response, owner_id)
     # A referential follow-up must be answered from this thread's conversation,
     # never from a standalone response cached for similar wording.
     recalled = None if contextual_follow_up else memory.recall_safe_response(payload.message)
@@ -362,7 +414,7 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("tools", "Diagnostic tools skipped", "skipped"),
                 ("answer", "Learned answer returned", "complete"),
             ),
-        })
+        }, owner_id)
     local_answer = None if contextual_follow_up else try_local_readonly_answer(payload.message)
     if local_answer:
         response = {
@@ -384,30 +436,39 @@ def create_incident(payload: IncidentRequest, request: Request):
         }
         memory.remember_safe_response(payload.message, response["message"])
         audit.write("incident_completed", thread_id=thread_id, source="local_tools")
-        return _track(memory, payload.message, response)
+        return _track(memory, payload.message, response, owner_id)
     try:
-        state = agent.invoke(
-            {"messages": [("user", payload.message)], "hitl_approved": False, "agent_steps": 0},
-            config=_config(thread_id),
-        )
+        history = []
+        for prior_query, prior_response in memory.session_context(thread_id, owner_id):
+            history.extend([("user", prior_query), ("assistant", prior_response)])
+        state = agent.invoke({
+            "messages": [*history, ("user", payload.message)],
+            "hitl_approved": False,
+            "agent_steps": 0,
+        })
     except (OpenAIError, OSError, TimeoutError) as error:
         logger.exception("incident_ai_failed error_type=%s", type(error).__name__)
         audit.write("incident_ai_failed", thread_id=thread_id, error_type=type(error).__name__)
         raise HTTPException(status_code=502, detail="The AI service is temporarily unavailable") from error
     response = _response(thread_id, state)
+    if response.get("pending_action"):
+        memory.register_action(thread_id, owner_id, response["pending_action"])
     # Model-generated answers remain untrusted until reviewed by an operator.
     audit.write("incident_result", thread_id=thread_id, status=response["status"], source="tools")
-    return _track(memory, payload.message, response)
+    return _track(memory, payload.message, response, owner_id)
 
 
 @app.post("/incidents/log-analysis")
-def analyze_log_file(payload: UploadedLogRequest, request: Request):
+def analyze_log_file(
+    payload: UploadedLogRequest,
+    request: Request,
+):
     """Analyze a user-selected text log without storing the file or enabling actions."""
     memory = request.app.state.memory
-    rate_limiter = request.app.state.rate_limiter
-    client_key = request.client.host if request.client else "unknown"
-    if not rate_limiter.allow(client_key):
-        raise HTTPException(status_code=429, detail="Too many requests. Please wait and try again.")
+    principal = principal_from_request(request)
+    require_role(principal, "investigator", "approver", "admin")
+    owner_id = principal.owner_id
+    _rate_limit(memory, principal, "log-analysis")
     filename = Path(payload.filename).name
     if filename != payload.filename or Path(filename).suffix.lower() not in {".log", ".txt", ".json"}:
         raise HTTPException(
@@ -426,16 +487,7 @@ def analyze_log_file(payload: UploadedLogRequest, request: Request):
         logger.exception("log_analysis_ai_failed error_type=%s", type(error).__name__)
         audit.write("log_analysis_ai_failed", thread_id=thread_id, error_type=type(error).__name__)
         raise HTTPException(status_code=502, detail="The AI service is temporarily unavailable") from error
-    # Keep the operator request and safe analysis result for later follow-up
-    # questions, but do not retain the raw uploaded log in conversation memory.
-    request.app.state.agent.update_state(
-        _config(thread_id),
-        {
-            "messages": [("user", payload.message), result],
-            "hitl_approved": False,
-            "agent_steps": 0,
-        },
-    )
+    # Raw logs are not retained; the redacted request and safe result are stored as a turn.
     response = {
         "thread_id": thread_id,
         "status": "completed",
@@ -456,35 +508,52 @@ def analyze_log_file(payload: UploadedLogRequest, request: Request):
             ("answer", "Findings and next steps returned", "complete"),
         ),
     }
-    audit.write("uploaded_log_analyzed", thread_id=thread_id, filename=filename)
-    return _track(memory, payload.message, response)
+    audit.write(
+        "uploaded_log_analyzed", thread_id=thread_id, filename=filename,
+        actor=principal.subject, auth_method=principal.auth_method,
+    )
+    return _track(memory, payload.message, response, owner_id)
 
 
 @app.post("/incidents/{thread_id}/approval")
 def decide_action(thread_id: str, payload: ApprovalRequest, request: Request):
-    agent = request.app.state.agent
-    config = _config(thread_id)
-    snapshot = agent.get_state(config)
-    if not snapshot.values or not snapshot.values.get("messages"):
-        raise HTTPException(status_code=404, detail="Incident thread not found")
-    state = snapshot.values
-    calls = getattr(state["messages"][-1], "tool_calls", []) or []
-    if not any(call["name"] == "restart_service" for call in calls):
+    memory = request.app.state.memory
+    principal = principal_from_request(request)
+    require_role(principal, "approver", "admin")
+    owner_id = principal.owner_id
+    _rate_limit(memory, principal, "approval")
+    action = memory.latest_action(thread_id, owner_id)
+    if not action or action["action_name"] != "restart_service":
         raise HTTPException(status_code=409, detail="No restart is awaiting approval")
-    pending = next(call for call in calls if call["name"] == "restart_service")
+    pending = {
+        "id": action["action_id"], "name": action["action_name"], "args": action["action_args"]
+    }
     expected_token = _approval_token(thread_id, pending)
     if not secrets.compare_digest(payload.approval_token, expected_token):
-        audit.write("action_decision_rejected", thread_id=thread_id, reason="invalid_capability")
+        audit.write(
+            "action_decision_rejected", thread_id=thread_id, reason="invalid_capability",
+            actor=principal.subject,
+        )
         raise HTTPException(status_code=403, detail="Invalid or expired approval capability")
+    action_id = action["action_id"]
+    if action["status"] in {"completed", "denied"}:
+        return action["result"]
+    if action["status"] == "executing":
+        raise HTTPException(status_code=409, detail="This action is already being executed")
+    if action["status"] == "failed":
+        raise HTTPException(status_code=409, detail="This action already failed; create a new proposal")
     if not payload.approved:
-        audit.write("action_decided", thread_id=thread_id, approved=False)
+        audit.write(
+            "action_decided", thread_id=thread_id, action_id=action_id, approved=False,
+            actor=principal.subject, auth_method=principal.auth_method,
+        )
         response = {
             "thread_id": thread_id,
             "status": "denied",
             "message": "Action denied; no mutation executed.",
             "source": "operator_decision",
             "usage": summarize_usage(
-                state.get("messages", []), settings.openai_model,
+                [], settings.openai_model,
                 settings.model_input_price_per_million,
                 settings.model_output_price_per_million,
             ),
@@ -494,17 +563,87 @@ def decide_action(thread_id: str, payload: ApprovalRequest, request: Request):
                 ("answer", "No production change made", "complete"),
             ),
         }
-        query = next((str(m.content) for m in state["messages"] if m.type == "human"), "")
-        return _track(request.app.state.memory, query, response)
+        context = memory.session_context(thread_id, owner_id, limit=1)
+        query = context[-1][0] if context else "Denied action"
+        response = _track(memory, query, response, owner_id)
+        memory.finish_action(action_id, owner_id, "denied", response)
+        return response
 
-    tool_result = execute_tools(state)
-    final = agent.invoke(
-        {"messages": tool_result["messages"], "hitl_approved": True}, config=config
+    if not memory.claim_action(action_id, owner_id):
+        current = memory.get_action(action_id, owner_id)
+        if current and current["status"] == "completed":
+            return current["result"]
+        raise HTTPException(status_code=409, detail="This action has already been decided")
+    try:
+        raw_result = restart_service(**action["action_args"], request_id=action_id)
+    except (ValueError, RuntimeError, OSError, TimeoutError) as error:
+        failure = {
+            "thread_id": thread_id,
+            "status": "action_failed",
+            "message": "The approved action was rejected or failed; no success was recorded.",
+            "pending_action": None,
+            "source": "approved_tool",
+            "learned": False,
+            "tool_result": {"error": type(error).__name__},
+            "flow": _flow(
+                ("request", "Incident investigated", "complete"),
+                ("approval", "Action approved by operator", "complete"),
+                ("action", "Approved action failed", "blocked"),
+                ("answer", "Failure recorded for review", "complete"),
+            ),
+        }
+        memory.finish_action(action_id, owner_id, "failed", failure)
+        audit.write("action_failed", thread_id=thread_id, action_id=action_id)
+        raise HTTPException(status_code=502, detail=failure["message"]) from error
+    audit.write(
+        "action_decided", thread_id=thread_id, action_id=action_id, approved=True,
+        actor=principal.subject, auth_method=principal.auth_method,
     )
-    audit.write("action_decided", thread_id=thread_id, approved=True)
-    response = _response(thread_id, final)
-    query = next((str(m.content) for m in final["messages"] if m.type == "human"), "")
-    return _track(request.app.state.memory, query, response)
+    response = {
+        "thread_id": thread_id,
+        "status": "completed",
+        "message": "The operator-approved action completed successfully.",
+        "pending_action": None,
+        "source": "approved_tool",
+        "learned": False,
+        "tool_result": raw_result,
+        "flow": _flow(
+            ("request", "Incident investigated", "complete"),
+            ("approval", "Action approved by operator", "complete"),
+            ("action", "Approved action executed once", "complete"),
+            ("answer", "Verified tool result returned", "complete"),
+        ),
+    }
+    context = memory.session_context(thread_id, owner_id, limit=1)
+    query = context[-1][0] if context else "Approved action"
+    response = _track(memory, query, response, owner_id)
+    memory.finish_action(action_id, owner_id, "completed", response)
+    return response
+
+
+@app.get("/sessions")
+def list_incident_sessions(
+    request: Request,
+    limit: int = 30,
+):
+    """Return redacted durable session summaries owned by this operator."""
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    principal = principal_from_request(request)
+    require_role(principal, "investigator", "approver", "admin")
+    return {"sessions": request.app.state.memory.list_sessions(principal.owner_id, limit)}
+
+
+@app.get("/sessions/{thread_id}")
+def get_incident_session(thread_id: str, request: Request, limit: int = 30):
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    principal = principal_from_request(request)
+    require_role(principal, "investigator", "approver", "admin")
+    turns = request.app.state.memory.session_turns(thread_id, principal.owner_id, limit)
+    if not turns:
+        raise HTTPException(status_code=404, detail="Incident session not found")
+    return {"thread_id": thread_id, "turns": turns}
 
 
 @app.get("/usage")
@@ -531,19 +670,22 @@ def usage_history(
 def submit_feedback(
     payload: FeedbackRequest,
     request: Request,
-    x_operator_key: str | None = Header(default=None),
 ):
     memory = request.app.state.memory
+    principal = principal_from_request(request)
+    require_role(principal, "investigator", "approver", "admin")
+    _rate_limit(memory, principal, "feedback")
     for value in (payload.service_name, payload.symptom, payload.resolution):
         if not inspect_prompt(value).allowed:
             raise HTTPException(status_code=400, detail="Feedback contains unsafe instruction-like content.")
     if payload.operator_approved:
-        if not settings.operator_api_key:
-            raise HTTPException(status_code=503, detail="Operator approval is not configured")
-        if not x_operator_key or not secrets.compare_digest(
-            x_operator_key, settings.operator_api_key
-        ):
-            raise HTTPException(status_code=403, detail="Valid operator credentials are required")
+        require_role(principal, "approver", "admin")
+        if settings.auth_mode == "api_key" and settings.operator_api_key:
+            supplied_key = request.headers.get("X-Operator-Key")
+            if not supplied_key or not secrets.compare_digest(
+                supplied_key, settings.operator_api_key
+            ):
+                raise HTTPException(status_code=403, detail="Valid operator credentials are required")
     lesson_id = memory.record(
         Lesson(
             payload.service_name,
@@ -553,7 +695,10 @@ def submit_feedback(
         ),
         approved=payload.operator_approved,
     )
-    audit.write("feedback_recorded", feedback_id=lesson_id, approved=payload.operator_approved)
+    audit.write(
+        "feedback_recorded", feedback_id=lesson_id, approved=payload.operator_approved,
+        actor=principal.subject, auth_method=principal.auth_method,
+    )
     return {
         "id": lesson_id,
         "learned": payload.operator_approved and payload.rating >= 4,
@@ -564,6 +709,9 @@ def submit_feedback(
 @app.post("/visuals", status_code=201)
 def create_visual(payload: VisualRequest, request: Request):
     """Generate an optional image after a safe DevOps answer is available."""
+    principal = principal_from_request(request)
+    require_role(principal, "investigator", "approver", "admin")
+    _rate_limit(request.app.state.memory, principal, "visuals")
     for value in (payload.request, payload.answer):
         security = inspect_prompt(value)
         if not security.allowed:
@@ -584,5 +732,8 @@ def create_visual(payload: VisualRequest, request: Request):
         logger.exception("visual_generation_failed error_type=%s", type(error).__name__)
         audit.write("visual_generation_failed", error_type=type(error).__name__)
         raise HTTPException(status_code=502, detail="Image generation failed") from error
-    audit.write("visual_generated", image_url=image_url)
+    audit.write(
+        "visual_generated", image_url=image_url,
+        actor=principal.subject, auth_method=principal.auth_method,
+    )
     return {"status": "completed", "image_url": image_url, "model": settings.image_model}

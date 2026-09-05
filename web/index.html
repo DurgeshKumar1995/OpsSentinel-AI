@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="OpsSentinel AI human-supervised incident response workspace">
   <title>OpsSentinel AI · Incident Agent</title>
-  <link rel="stylesheet" href="/static/styles.css?v=16">
+  <link rel="stylesheet" href="/static/styles.css?v=18">
 </head>
 <body>
   <header class="topbar">
@@ -13,7 +13,7 @@
       <span class="brand-mark">O</span>
       <span>OpsSentinel AI</span>
     </a>
-    <div class="system-status"><span class="status-dot"></span> Agent online</div>
+    <div class="topbar-actions"><div class="system-status"><span class="status-dot"></span> Agent online</div><button type="button" id="operator-access" class="operator-access">Operator access</button></div>
   </header>
 
   <main>
@@ -22,6 +22,7 @@
         <div class="session-heading"><div><small>INCIDENT SESSIONS</small><strong>Your workspace</strong></div><button type="button" id="new-session" aria-label="Create new session" title="Create new session">＋</button></div>
         <div id="session-list" class="session-list" aria-label="Saved incident sessions"></div>
         <p id="session-empty" class="session-empty">Your investigations will appear here.</p>
+        <button type="button" id="clear-sessions" class="clear-sessions">Clear local history</button>
         <div class="workflow-compact" aria-label="Incident workflow">
           <div class="step active" data-step="1"><span>1</span><div><b>Report</b><small>Describe</small></div></div>
           <div class="line"></div>
@@ -45,6 +46,7 @@
         <div class="composer-pane">
         <form id="incident-form">
           <div class="field-heading"><label for="incident-message">Incident details</label><span id="message-count">0 / 2000</span></div>
+          <div id="active-session-context" class="active-session-context" role="status">New session · no previous context</div>
           <textarea id="incident-message" required minlength="3" maxlength="2000" placeholder="Ask about a deployment, CI/CD pipeline, cloud service, monitoring alert, or production incident."></textarea>
           <div class="prompt-library">
             <div class="prompt-library-heading"><span>Saved prompt tags</span><button type="button" class="manage-tags" id="manage-tags">Manage tags</button></div>
@@ -196,7 +198,15 @@
     </section>
   </main>
 
+  <dialog id="operator-dialog" class="operator-dialog">
+    <form method="dialog" id="operator-form">
+      <div><p class="section-label">SECURE ACCESS</p><h2>Operator credentials</h2></div>
+      <p>The key stays in this browser tab only and is sent with protected API requests.</p>
+      <label>Operator API key<input id="operator-access-key" type="password" autocomplete="off" placeholder="Enter operator key"></label>
+      <div class="operator-dialog-actions"><button value="cancel" class="secondary">Cancel</button><button value="default" class="primary">Use key</button></div>
+    </form>
+  </dialog>
   <footer><span>OpsSentinel AI Incident Agent</span><span>Human-supervised · Evidence-led · Auditable</span></footer>
-  <script src="/static/app.js?v=16" defer></script>
+  <script src="/static/app.js?v=18" defer></script>
 </body>
 </html>

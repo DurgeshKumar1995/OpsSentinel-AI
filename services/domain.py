@@ -75,6 +75,7 @@ FOLLOW_UP_PATTERNS = (
     r"\b(?:explain|expand|elaborate|clarify|describe)\s+(?:this|that|it|more|point|step|item|number|no)\b",
     r"\b(?:more|additional|further)\s+(?:detail|details|information|info)\b",
     r"\b(?:point|step|item|number|no)\s*(?:no\.?\s*)?\d+\b",
+    r"\b\d+(?:st|nd|rd|th)\s+(?:point|step|item)\b",
     r"\bwhat\s+(?:does|do|is|are)\s+(?:that|this|it|those|these)\b",
     r"\b(?:that|this)\s+(?:point|step|item)\b",
     r"\b(?:in|from)\s+(?:the\s+)?(?:(?:previous|above|last|your)\s+)?(?:response|answer)\b",
@@ -121,6 +122,60 @@ def is_project_info_request(text: str) -> bool:
     """Recognize requests asking the agent to introduce this project or its usage."""
     normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
     return any(re.search(pattern, normalized) for pattern in PROJECT_INFO_PATTERNS)
+
+
+def project_info_follow_up_step(text: str, previous_user_messages: list[str]) -> int | None:
+    """Resolve numbered guide follow-ups only inside an established project-guide session."""
+    if not any(is_project_info_request(message) for message in previous_user_messages):
+        return None
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    if not any(re.search(pattern, normalized) for pattern in FOLLOW_UP_PATTERNS):
+        return None
+    match = re.search(
+        r"\b(?:(?:point|step|item|number|no)\s*(?:no\s*)?(\d+)|(\d+)(?:st|nd|rd|th)\s+(?:point|step|item))\b",
+        normalized,
+    )
+    if not match:
+        return None
+    step = int(match.group(1) or match.group(2))
+    return step if 1 <= step <= 7 else None
+
+
+PROJECT_GUIDE_STEPS = {
+    1: (
+        "Step 1 — Report: Enter the incident in Incident details. Include the service name, "
+        "environment, visible symptoms, approximate start time, and recent deployment or configuration changes."
+    ),
+    2: (
+        "Step 2 — Add evidence: Optionally attach a .log, .txt, or .json file up to 100 KB. "
+        "The file is treated as untrusted evidence, checked for safety, and analyzed without enabling production actions."
+    ),
+    3: (
+        "Step 3 — Choose a visual: Enable Create an AI architecture image when a diagram would make "
+        "the incident, service dependencies, or proposed flow easier to understand. The text investigation "
+        "is returned first; the supporting diagram is generated afterward. Leave it unchecked for a faster, lower-cost response."
+    ),
+    4: (
+        "Step 4 — Investigate: Select Start investigation. OpsSentinel checks prompt safety and DevOps scope, "
+        "reviews the session and approved knowledge, gathers permitted evidence, and returns findings and next steps."
+    ),
+    5: (
+        "Step 5 — Review: Read the finding, supporting evidence, recommended next step, processing trace, "
+        "model usage, and estimated cost. Treat hypotheses separately from confirmed evidence."
+    ),
+    6: (
+        "Step 6 — Resolve: If a production mutation is proposed, review the service and reason, then approve "
+        "or deny it. The action remains paused until an authorized approver explicitly decides."
+    ),
+    7: (
+        "Step 7 — Learn: Rate and correct the resolution. Only highly rated feedback explicitly approved by "
+        "an authorized operator is allowed to guide similar future investigations."
+    ),
+}
+
+
+def project_guide_step_message(step: int) -> str:
+    return PROJECT_GUIDE_STEPS[step]
 
 
 def is_project_improvement_request(text: str) -> bool:

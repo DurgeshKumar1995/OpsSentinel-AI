@@ -15,6 +15,8 @@ let approvalToken = '';
 const PROMPT_LIBRARY_KEY = 'opssentinel-prompt-library-v1';
 const SESSION_STORE_KEY = 'opssentinel-incident-sessions-v1';
 const APPROVAL_STORE_KEY = 'opssentinel-pending-approvals-v1';
+const OPERATOR_STORE_KEY = 'opssentinel-operator-key-v1';
+const SESSION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_PROMPT_LIBRARY = {
   groups: [{id: 'diagnostics', name: 'Diagnostics'}, {id: 'recovery', name: 'Recovery'}],
   tags: [
@@ -30,7 +32,7 @@ function newId(prefix) { return `${prefix}-${Date.now()}-${Math.random().toStrin
 function loadSessions() {
   try {
     const saved = JSON.parse(localStorage.getItem(SESSION_STORE_KEY));
-    if (Array.isArray(saved)) return saved.filter((session) => session?.id && Array.isArray(session.turns)).slice(0, 20);
+    if (Array.isArray(saved)) return saved.filter((session) => session?.id && Array.isArray(session.turns) && Date.now() - Number(session.updatedAt || 0) <= SESSION_RETENTION_MS).slice(0, 20);
   } catch (_) { /* Invalid session history is ignored. */ }
   return [];
 }
@@ -107,14 +109,34 @@ function renderSessions() {
   $('#session-empty').classList.toggle('hidden', items.length > 0);
 }
 
-function activateSession(id) {
-  const session = sessions.find((item) => item.id === id);
+function updateActiveSessionContext(session = null) {
+  const context = $('#active-session-context');
+  context.textContent = session
+    ? `Using session context: ${session.title || 'Untitled incident'}`
+    : 'New session · no previous context';
+  context.classList.toggle('has-context', Boolean(session));
+}
+
+async function activateSession(id) {
+  let session = sessions.find((item) => item.id === id);
+  if (session?.serverBacked && !session.turns.length) {
+    try {
+      const detail = await request(`/sessions/${encodeURIComponent(id)}`);
+      session.turns = detail.turns.map((turn) => ({
+        request: turn.query,
+        response: {thread_id: id, message: turn.response, status: turn.status, source: turn.source},
+        createdAt: Date.parse(turn.created_at),
+      }));
+      saveSessions();
+    } catch (_) { return; }
+  }
   const turn = session?.turns.at(-1);
   if (!turn) return;
   threadId = session.id;
   originalSymptom = turn.request;
   messageInput.value = turn.request;
   messageInput.dispatchEvent(new Event('input'));
+  updateActiveSessionContext(session);
   renderSessions();
   renderResult({...turn.response, approval_token: approvalTokens()[id] || ''});
   revealWorkspaceResponse();
@@ -128,6 +150,7 @@ function startNewSession() {
   result.classList.add('hidden'); feedback.classList.add('hidden'); approvalCard.classList.add('hidden');
   progress.classList.add('hidden'); responseEmpty.classList.remove('hidden');
   $('#generated-visual').classList.add('hidden'); $('#download-image').classList.add('hidden'); $('#response-action-status').textContent = '';
+  updateActiveSessionContext();
   renderSessions(); setStep(1); messageInput.focus();
 }
 
@@ -300,13 +323,32 @@ messageInput.addEventListener('keydown', (event) => {
 });
 
 async function request(url, options = {}) {
+  const operatorKey = sessionStorage.getItem(OPERATOR_STORE_KEY);
   const response = await fetch(url, {
     ...options,
-    headers: {'Content-Type': 'application/json', ...(options.headers || {})},
+    headers: {'Content-Type': 'application/json', ...(operatorKey ? {'X-Operator-Key': operatorKey} : {}), ...(options.headers || {})},
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.detail || 'The agent service returned an error.');
   return data;
+}
+
+async function syncServerSessions() {
+  try {
+    const data = await request('/sessions?limit=20');
+    data.sessions.forEach((remote) => {
+      if (sessions.some((item) => item.id === remote.thread_id)) return;
+      sessions.push({
+        id: remote.thread_id,
+        title: remote.title,
+        createdAt: Date.parse(remote.updated_at),
+        updatedAt: Date.parse(remote.updated_at),
+        turns: [],
+        serverBacked: true,
+      });
+    });
+    saveSessions();
+  } catch (_) { /* Production sessions load after operator credentials are supplied. */ }
 }
 
 function renderResult(data) {
@@ -578,6 +620,24 @@ $('#approve-button').addEventListener('click', () => decide(true));
 $('#deny-button').addEventListener('click', () => decide(false));
 $('#new-incident').addEventListener('click', startNewSession);
 $('#new-session').addEventListener('click', startNewSession);
+$('#clear-sessions').addEventListener('click', () => {
+  if (!window.confirm('Clear all incident history saved in this browser?')) return;
+  sessions = [];
+  localStorage.removeItem(SESSION_STORE_KEY);
+  sessionStorage.removeItem(APPROVAL_STORE_KEY);
+  startNewSession();
+});
+$('#operator-access').addEventListener('click', () => {
+  $('#operator-access-key').value = sessionStorage.getItem(OPERATOR_STORE_KEY) || '';
+  $('#operator-dialog').showModal();
+});
+$('#operator-form').addEventListener('submit', (event) => {
+  if (event.submitter?.value === 'cancel') return;
+  const key = $('#operator-access-key').value.trim();
+  if (key) sessionStorage.setItem(OPERATOR_STORE_KEY, key);
+  else sessionStorage.removeItem(OPERATOR_STORE_KEY);
+  window.setTimeout(syncServerSessions, 0);
+});
 $('#feedback-approved').addEventListener('change', (event) => {
   $('#operator-key-field').classList.toggle('hidden', !event.target.checked);
   if (!event.target.checked) $('#feedback-operator-key').value = '';
@@ -618,3 +678,5 @@ $('#feedback-form').addEventListener('submit', async (event) => {
     status.textContent = data.learned ? 'Saved. This reviewed lesson can help future investigations.' : 'Saved for review. It will not influence the agent yet.';
   } catch (error) { status.textContent = error.message; }
 });
+
+syncServerSessions();
