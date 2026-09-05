@@ -1,4 +1,4 @@
-"""SafeOps HTTP application."""
+"""OpsSentinel AI HTTP application."""
 
 import logging
 import secrets
@@ -17,7 +17,13 @@ from config.settings import settings
 from graph.workflow import get_graph_builder
 from services.agent_logic import analyze_uploaded_logs, execute_tools
 from services.audit import AuditLogger
-from services.domain import OUT_OF_SCOPE_MESSAGE, is_devops_follow_up, is_devops_request
+from services.domain import (
+    OUT_OF_SCOPE_MESSAGE,
+    PROJECT_INFO_MESSAGE,
+    is_devops_follow_up,
+    is_devops_request,
+    is_project_info_request,
+)
 from services.embeddings import create_embedder
 from services.local_reasoning import try_local_readonly_answer
 from services.memory import LearningStore, Lesson
@@ -154,7 +160,7 @@ def _previous_user_messages(agent, thread_id: str) -> list[str]:
 
 
 app = FastAPI(
-    title="SafeOps Incident Agent",
+    title="OpsSentinel AI Incident Agent",
     version="1.0.0",
     description="Human-supervised incident diagnosis with reviewed outcome learning.",
     docs_url="/developer/docs",
@@ -226,6 +232,24 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("request", "Request received", "complete"),
                 ("guard", "Prompt-injection security check", "blocked"),
                 ("answer", "Request safely blocked", "complete"),
+            ),
+        })
+    if is_project_info_request(payload.message):
+        audit.write("incident_completed", thread_id=thread_id, source="project_info")
+        return _track(memory, payload.message, {
+            "thread_id": thread_id,
+            "status": "completed",
+            "message": PROJECT_INFO_MESSAGE,
+            "pending_action": None,
+            "source": "project_info",
+            "learned": False,
+            "usage": zero_usage(),
+            "flow": _flow(
+                ("request", "Request received", "complete"),
+                ("guard", "Security check completed", "complete"),
+                ("route", "Project introduction selected", "complete"),
+                ("ai", "External AI call skipped", "skipped"),
+                ("answer", "Project overview and usage returned", "complete"),
             ),
         })
     previous_user_messages = (

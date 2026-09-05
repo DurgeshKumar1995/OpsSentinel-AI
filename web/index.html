@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Human-supervised AI incident response workspace">
-  <title>SafeOps · Incident Agent</title>
-  <link rel="stylesheet" href="/static/styles.css?v=6">
+  <meta name="description" content="OpsSentinel AI human-supervised incident response workspace">
+  <title>OpsSentinel AI · Incident Agent</title>
+  <link rel="stylesheet" href="/static/styles.css?v=7">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="SafeOps home">
-      <span class="brand-mark">S</span>
-      <span>SafeOps</span>
+    <a class="brand" href="/" aria-label="OpsSentinel AI home">
+      <span class="brand-mark">O</span>
+      <span>OpsSentinel AI</span>
     </a>
     <div class="system-status"><span class="status-dot"></span> Agent online</div>
   </header>
@@ -20,7 +20,7 @@
     <section class="hero">
       <p class="eyebrow">AI INCIDENT RESPONSE</p>
       <h1>Diagnose faster.<br><span>Act with control.</span></h1>
-      <p class="hero-copy">Describe what is happening. SafeOps checks evidence, explains its findings, and always asks before taking a risky action.</p>
+      <p class="hero-copy">Describe what is happening. OpsSentinel AI checks evidence, explains its findings, and always asks before taking a risky action.</p>
     </section>
 
     <section class="workspace" aria-labelledby="incident-heading">
@@ -44,9 +44,9 @@
         <form id="incident-form">
           <label for="incident-message">Incident details</label>
           <textarea id="incident-message" required minlength="3" maxlength="2000" placeholder="Ask about a deployment, CI/CD pipeline, cloud service, monitoring alert, or production incident."></textarea>
-          <div class="examples" aria-label="Example incidents">
-            <button type="button" data-example="Check payment-gateway logs for the last 15 minutes.">Check payment logs</button>
-            <button type="button" data-example="The auth-service is returning 500 errors. Investigate and fix it.">Fix auth service</button>
+          <div class="prompt-library">
+            <div class="prompt-library-heading"><span>Saved prompt tags</span><button type="button" class="manage-tags" id="manage-tags">Manage tags</button></div>
+            <div id="prompt-groups" class="prompt-groups" aria-label="Saved prompt tags"></div>
           </div>
           <label class="log-upload" for="incident-log-file">
             <span><b>Upload a log file</b><small>Optional · .log, .txt, or .json · maximum 100 KB</small></span>
@@ -61,6 +61,21 @@
             <span>Start investigation</span><span aria-hidden="true">→</span>
           </button>
         </form>
+
+        <dialog id="tag-manager" class="tag-manager">
+          <div class="tag-manager-heading"><div><p class="section-label">PROMPT LIBRARY</p><h3>Manage tags and groups</h3></div><button type="button" class="dialog-close" id="close-tag-manager" aria-label="Close tag manager">×</button></div>
+          <p class="tag-help">Each tag has a short label and a full prompt. Selecting the tag places that prompt into Incident details.</p>
+          <form id="group-form" class="group-form">
+            <label for="group-name">New group</label><div><input id="group-name" maxlength="40" placeholder="For example: Payments" required><button class="secondary compact" type="submit">Add group</button></div>
+          </form>
+          <form id="tag-form" class="tag-form">
+            <input id="tag-id" type="hidden"><label for="tag-label">Tag label</label><input id="tag-label" maxlength="50" placeholder="Check payment logs" required>
+            <label for="tag-prompt">Prompt sent to the agent</label><textarea id="tag-prompt" maxlength="2000" placeholder="Check payment-gateway logs for the last 15 minutes." required></textarea>
+            <label for="tag-group">Group</label><select id="tag-group" required></select>
+            <div class="tag-form-actions"><button class="primary compact" type="submit"><span>Save tag</span></button><button class="secondary compact hidden" id="cancel-tag-edit" type="button">Cancel edit</button></div>
+          </form>
+          <div id="tag-manager-list" class="tag-manager-list"></div>
+        </dialog>
 
         <div id="progress" class="progress hidden" role="status" aria-live="polite">
           <span class="spinner"></span>
@@ -133,7 +148,7 @@
     </section>
   </main>
 
-  <footer><span>SafeOps Incident Agent</span><span>Human-supervised · Evidence-led · Auditable</span></footer>
-  <script src="/static/app.js?v=7" defer></script>
+  <footer><span>OpsSentinel AI Incident Agent</span><span>Human-supervised · Evidence-led · Auditable</span></footer>
+  <script src="/static/app.js?v=8" defer></script>
 </body>
 </html>

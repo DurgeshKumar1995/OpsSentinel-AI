@@ -1,4 +1,4 @@
-"""Convert Loghub samples into deterministic JSONL splits for SafeOps."""
+"""Convert Loghub samples into deterministic JSONL splits for OpsSentinel AI."""
 
 import csv
 import hashlib

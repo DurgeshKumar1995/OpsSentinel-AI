@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for improving SafeOps.
+Thank you for improving OpsSentinel AI.
 
 Start with an item in [ROADMAP.md](ROADMAP.md), an issue labeled
 `good first issue`, or a small documentation/test improvement. For larger work,

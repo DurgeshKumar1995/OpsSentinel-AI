@@ -1,4 +1,4 @@
-"""Index the prepared training split into SafeOps semantic knowledge memory."""
+"""Index the prepared training split into OpsSentinel AI semantic knowledge memory."""
 
 import json
 import sys

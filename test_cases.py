@@ -26,7 +26,7 @@ import api
 from graph.workflow import get_graph_builder
 from models.schemas import RestartServiceInput
 from services.agent_logic import execute_tools
-from services.domain import is_devops_follow_up, is_devops_request
+from services.domain import is_devops_follow_up, is_devops_request, is_project_info_request
 from services.embeddings import LocalHashEmbedder
 from services.local_reasoning import try_local_readonly_answer
 from services.memory import LearningStore, Lesson
@@ -378,6 +378,14 @@ class SecurityTests(unittest.TestCase):
             with self.subTest(request=request):
                 self.assertTrue(is_devops_request(request))
 
+    def test_project_introduction_requests_are_recognized(self):
+        self.assertTrue(is_project_info_request("explain me your self"))
+        self.assertTrue(is_project_info_request("What is this project?"))
+        self.assertTrue(is_project_info_request("How do I use this app?"))
+        self.assertTrue(is_project_info_request("how to use you"))
+        self.assertTrue(is_project_info_request("Provide the steps to use this project"))
+        self.assertFalse(is_project_info_request("Explain a Kubernetes deployment"))
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -402,6 +410,20 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "out_of_scope")
         self.assertEqual(response.json()["source"], "scope_guard")
         self.assertEqual(response.json()["flow"][1]["status"], "blocked")
+        invoke.assert_not_called()
+
+    def test_project_introduction_explains_purpose_and_usage_without_ai(self):
+        with patch.object(self.client.app.state.agent, "invoke") as invoke:
+            response = self.client.post(
+                "/incidents", json={"message": "how to use you"}
+            )
+        payload = response.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["source"], "project_info")
+        self.assertIn("OpsSentinel AI", payload["message"])
+        self.assertIn("How to use this project", payload["message"])
+        self.assertIn("Overall flow:", payload["message"])
+        self.assertEqual(payload["usage"]["input_tokens"], 0)
         invoke.assert_not_called()
 
     def test_kubectl_question_reaches_agent(self):
@@ -617,11 +639,13 @@ class ApiTests(unittest.TestCase):
     def test_homepage_serves_incident_workspace(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("SafeOps", response.text)
+        self.assertIn("OpsSentinel AI", response.text)
         self.assertIn("Start investigation", response.text)
         self.assertIn("Copy response", response.text)
         self.assertIn("Download response", response.text)
         self.assertIn("Download image", response.text)
+        self.assertIn("Manage tags", response.text)
+        self.assertIn('id="tag-manager"', response.text)
         self.assertIn("ESTIMATED COST", response.text)
         self.assertLess(
             response.text.index('class="result-title"'),
@@ -634,6 +658,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("document.execCommand('copy')", response.text)
         self.assertIn("window.setTimeout(() => URL.revokeObjectURL(url), 1000)", response.text)
         self.assertIn("data:text/plain;charset=utf-8", response.text)
+        self.assertIn("opssentinel-prompt-library-v1", response.text)
+        self.assertIn("renderPromptLibrary", response.text)
 
     def test_old_docs_url_redirects_regular_users_home(self):
         response = self.client.get("/docs", follow_redirects=False)

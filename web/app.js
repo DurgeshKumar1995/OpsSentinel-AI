@@ -10,6 +10,138 @@ let threadId = null;
 let originalSymptom = '';
 let latestAnswer = '';
 
+const PROMPT_LIBRARY_KEY = 'opssentinel-prompt-library-v1';
+const DEFAULT_PROMPT_LIBRARY = {
+  groups: [{id: 'diagnostics', name: 'Diagnostics'}, {id: 'recovery', name: 'Recovery'}],
+  tags: [
+    {id: 'payment-logs', groupId: 'diagnostics', label: 'Check payment logs', prompt: 'Check payment-gateway logs for the last 15 minutes.'},
+    {id: 'fix-auth', groupId: 'recovery', label: 'Fix auth service', prompt: 'The auth-service is returning 500 errors. Investigate and fix it.'},
+  ],
+};
+let promptLibrary = loadPromptLibrary();
+
+function newId(prefix) { return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+
+function loadPromptLibrary() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PROMPT_LIBRARY_KEY));
+    if (Array.isArray(saved?.groups) && Array.isArray(saved?.tags) && saved.groups.length) return saved;
+  } catch (_) { /* Invalid browser data is safely replaced with defaults. */ }
+  return JSON.parse(JSON.stringify(DEFAULT_PROMPT_LIBRARY));
+}
+
+function savePromptLibrary() {
+  localStorage.setItem(PROMPT_LIBRARY_KEY, JSON.stringify(promptLibrary));
+  renderPromptLibrary();
+  renderTagManager();
+}
+
+function renderPromptLibrary() {
+  const sections = promptLibrary.groups.map((group) => {
+    const tags = promptLibrary.tags.filter((tag) => tag.groupId === group.id);
+    if (!tags.length) return null;
+    const section = document.createElement('section');
+    section.className = 'prompt-group';
+    const heading = document.createElement('small');
+    heading.textContent = group.name;
+    const list = document.createElement('div');
+    list.className = 'prompt-tags';
+    tags.forEach((tag) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'prompt-tag';
+      button.textContent = tag.label;
+      button.title = tag.prompt;
+      button.addEventListener('click', () => { messageInput.value = tag.prompt; messageInput.focus(); });
+      list.append(button);
+    });
+    section.append(heading, list);
+    return section;
+  }).filter(Boolean);
+  $('#prompt-groups').replaceChildren(...sections);
+}
+
+function resetTagForm() {
+  $('#tag-form').reset();
+  $('#tag-id').value = '';
+  $('#cancel-tag-edit').classList.add('hidden');
+}
+
+function renderTagManager() {
+  const select = $('#tag-group');
+  const selected = select.value;
+  select.replaceChildren(...promptLibrary.groups.map((group) => {
+    const option = document.createElement('option');
+    option.value = group.id;
+    option.textContent = group.name;
+    return option;
+  }));
+  if (promptLibrary.groups.some((group) => group.id === selected)) select.value = selected;
+  const groups = promptLibrary.groups.map((group) => {
+    const section = document.createElement('section');
+    section.className = 'tag-manager-group';
+    const header = document.createElement('div');
+    const title = document.createElement('h4');
+    title.textContent = group.name;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'tag-action danger-text';
+    remove.textContent = 'Delete group';
+    remove.disabled = promptLibrary.groups.length === 1;
+    remove.addEventListener('click', () => deleteGroup(group.id));
+    header.append(title, remove);
+    section.append(header);
+    promptLibrary.tags.filter((tag) => tag.groupId === group.id).forEach((tag) => {
+      const row = document.createElement('div');
+      row.className = 'tag-manager-row';
+      const copy = document.createElement('div');
+      const label = document.createElement('b');
+      label.textContent = tag.label;
+      const prompt = document.createElement('small');
+      prompt.textContent = tag.prompt;
+      copy.append(label, prompt);
+      const actions = document.createElement('div');
+      ['Edit', 'Delete'].forEach((action) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `tag-action${action === 'Delete' ? ' danger-text' : ''}`;
+        button.textContent = action;
+        button.addEventListener('click', () => action === 'Edit' ? editTag(tag.id) : deleteTag(tag.id));
+        actions.append(button);
+      });
+      row.append(copy, actions);
+      section.append(row);
+    });
+    return section;
+  });
+  $('#tag-manager-list').replaceChildren(...groups);
+}
+
+function editTag(id) {
+  const tag = promptLibrary.tags.find((item) => item.id === id);
+  if (!tag) return;
+  $('#tag-id').value = tag.id;
+  $('#tag-label').value = tag.label;
+  $('#tag-prompt').value = tag.prompt;
+  $('#tag-group').value = tag.groupId;
+  $('#cancel-tag-edit').classList.remove('hidden');
+  $('#tag-label').focus();
+}
+
+function deleteTag(id) {
+  promptLibrary.tags = promptLibrary.tags.filter((tag) => tag.id !== id);
+  savePromptLibrary();
+}
+
+function deleteGroup(id) {
+  if (promptLibrary.groups.length === 1) return;
+  const fallback = promptLibrary.groups.find((group) => group.id !== id);
+  promptLibrary.tags.forEach((tag) => { if (tag.groupId === id) tag.groupId = fallback.id; });
+  promptLibrary.groups = promptLibrary.groups.filter((group) => group.id !== id);
+  resetTagForm();
+  savePromptLibrary();
+}
+
 function setStep(number) {
   document.querySelectorAll('.step').forEach((step) => {
     step.classList.toggle('active', Number(step.dataset.step) <= number);
@@ -101,7 +233,7 @@ function responseDocument() {
   const flow = [...document.querySelectorAll('#flow-steps li')]
     .map((item, index) => `${index + 1}. ${item.textContent}`)
     .join('\n');
-  return `SafeOps response\n\nRequest\n${originalSymptom}\n\nAnswer\n${latestAnswer}\n\nProcessing flow\n${flow}\n`;
+  return `OpsSentinel AI response\n\nRequest\n${originalSymptom}\n\nAnswer\n${latestAnswer}\n\nProcessing flow\n${flow}\n`;
 }
 
 function downloadBlob(blob, filename) {
@@ -174,7 +306,7 @@ $('#copy-response').addEventListener('click', async () => {
 });
 
 $('#download-response').addEventListener('click', () => {
-  downloadText(responseDocument(), `safeops-response-${threadId || 'result'}.txt`);
+  downloadText(responseDocument(), `opssentinel-ai-response-${threadId || 'result'}.txt`);
   showActionSuccess($('#download-response'), 'Downloaded');
 });
 
@@ -183,7 +315,7 @@ $('#download-image').addEventListener('click', async () => {
   try {
     const response = await fetch($('#visual-image').src);
     if (!response.ok) throw new Error('download failed');
-    downloadBlob(await response.blob(), `safeops-architecture-${threadId || 'visual'}.png`);
+    downloadBlob(await response.blob(), `opssentinel-ai-architecture-${threadId || 'visual'}.png`);
     status.textContent = 'Image downloaded';
   } catch (_) {
     status.textContent = 'Image download failed';
@@ -211,9 +343,29 @@ function detail(label, value) {
   return wrapper;
 }
 
-document.querySelectorAll('[data-example]').forEach((button) => {
-  button.addEventListener('click', () => { messageInput.value = button.dataset.example; messageInput.focus(); });
+$('#manage-tags').addEventListener('click', () => { resetTagForm(); renderTagManager(); $('#tag-manager').showModal(); });
+$('#close-tag-manager').addEventListener('click', () => $('#tag-manager').close());
+$('#cancel-tag-edit').addEventListener('click', resetTagForm);
+$('#group-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const name = $('#group-name').value.trim();
+  if (!name) return;
+  promptLibrary.groups.push({id: newId('group'), name});
+  event.target.reset();
+  savePromptLibrary();
 });
+$('#tag-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const id = $('#tag-id').value;
+  const values = {groupId: $('#tag-group').value, label: $('#tag-label').value.trim(), prompt: $('#tag-prompt').value.trim()};
+  if (!values.label || !values.prompt || !values.groupId) return;
+  const existing = promptLibrary.tags.find((tag) => tag.id === id);
+  if (existing) Object.assign(existing, values);
+  else promptLibrary.tags.push({id: newId('tag'), ...values});
+  resetTagForm();
+  savePromptLibrary();
+});
+renderPromptLibrary();
 
 incidentForm.addEventListener('submit', async (event) => {
   event.preventDefault();

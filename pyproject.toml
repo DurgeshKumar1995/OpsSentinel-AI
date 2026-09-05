@@ -1,7 +1,7 @@
 [project]
-name = "safeops-agent"
+name = "opssentinel-ai"
 version = "1.0.0"
-description = "Human-supervised DevOps incident response agent"
+description = "OpsSentinel AI human-supervised DevOps incident response agent"
 requires-python = ">=3.11"
 
 [tool.vercel]

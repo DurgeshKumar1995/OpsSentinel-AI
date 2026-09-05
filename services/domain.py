@@ -101,3 +101,40 @@ OUT_OF_SCOPE_MESSAGE = (
     "monitoring, SRE, and production incident questions. Please describe a "
     "deployment, pipeline, infrastructure, or service reliability problem."
 )
+
+
+PROJECT_INFO_PATTERNS = (
+    r"\b(?:explain|describe|introduce|tell me about)\s+(?:me\s+)?(?:your\s*)?self\b",
+    r"\bwhat\s+(?:are you|is this (?:app|application|project|agent))\b",
+    r"\bhow\s+(?:do i|to)\s+use\s+(?:you|this|this (?:app|application|project|agent)|the (?:app|application|project|agent))\b",
+    r"\b(?:show|provide|give)(?: me)?\s+(?:the\s+)?(?:steps?|flow|instructions?)\s+(?:to|for|on)\s+(?:use|using)\s+(?:you|this|the (?:app|application|project|agent))\b",
+)
+
+
+def is_project_info_request(text: str) -> bool:
+    """Recognize requests asking the agent to introduce this project or its usage."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    return any(re.search(pattern, normalized) for pattern in PROJECT_INFO_PATTERNS)
+
+
+PROJECT_INFO_MESSAGE = (
+    "I’m OpsSentinel AI, a human-supervised DevOps incident-response project. "
+    "I help investigate deployments, CI/CD pipelines, cloud infrastructure, monitoring alerts, "
+    "logs, SRE concerns, and production incidents. I check available evidence, explain findings, "
+    "and pause for your approval before any risky action.\n\n"
+    "How to use this project:\n"
+    "1. Report — Describe your issue in Incident details. Include the service, environment, "
+    "symptoms, time window, and recent changes when known.\n"
+    "2. Add evidence — Optionally upload a .log, .txt, or .json file (maximum 100 KB).\n"
+    "3. Choose a visual — Select Create an AI architecture image when you want a supporting diagram.\n"
+    "4. Investigate — Select Start investigation. The project checks security and scope, reviews "
+    "available evidence and approved incident memory, then uses a safe local tool or the AI workflow.\n"
+    "5. Review — Read the finding, evidence, recommended next step, usage details, and processing flow.\n"
+    "6. Resolve — If a risky action such as a restart is proposed, approve or deny it. Nothing risky "
+    "runs without explicit approval.\n"
+    "7. Learn — Submit operator-approved feedback. Only approved, highly rated resolutions can guide "
+    "similar future incidents.\n\n"
+    "Overall flow: Report → Security and scope checks → Evidence and memory review → Investigation → "
+    "Human approval when required → Result → Reviewed learning.\n\n"
+    "Example: ‘Check payment-gateway logs for the last 15 minutes and explain any errors.’"
+)

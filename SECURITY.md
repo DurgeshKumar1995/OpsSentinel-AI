@@ -13,7 +13,7 @@ reasonable remediation period before public disclosure.
 
 ## Deployment warning
 
-SafeOps is a reference implementation, not a production control plane. Its
+OpsSentinel AI is a reference implementation, not a production control plane. Its
 included monitoring and restart adapters are mocks. Before connecting a fork to
 real infrastructure, add authenticated tool adapters, user authentication and
 RBAC, tenant isolation, a shared durable checkpoint store, immutable audit

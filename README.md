@@ -1,6 +1,6 @@
-# SafeOps Incident Agent
+# OpsSentinel AI Incident Agent
 
-A public reference implementation of a human-supervised DevOps agent. SafeOps
+A public reference implementation of a human-supervised DevOps agent. OpsSentinel AI
 investigates incidents, uses local and model-driven tools, requests approval before
 risky operations, and improves retrieval from reviewed outcomes.
 

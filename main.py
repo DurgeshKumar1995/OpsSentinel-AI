@@ -1,4 +1,4 @@
-"""Local SafeOps application entry point."""
+"""Local OpsSentinel AI application entry point."""
 
 import uvicorn
 

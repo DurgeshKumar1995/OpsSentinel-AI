@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     )
     langchain_tracing_v2: bool = False
     langchain_api_key: str | None = Field(default=None, repr=False)
-    langchain_project: str = "SafeOps-Agent"
+    langchain_project: str = "OpsSentinel-AI"
 
     @property
     def service_allowlist(self) -> set[str]:
