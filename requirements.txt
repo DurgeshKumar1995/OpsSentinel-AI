@@ -1,5 +1,5 @@
 # Direct runtime dependencies only. Transitive packages are resolved by pip.
-fastapi==0.139.2
+fastapi==0.141.1
 langchain-core==1.5.4
 langchain-openai==1.4.3
 langgraph==1.2.11
