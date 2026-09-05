@@ -148,10 +148,14 @@ For copy-paste prompts covering diagnostics, architecture diagrams, learned memo
 changed intent, human approval, scope rejection, and injection protection, see
 [Test prompts and expected results](docs/TEST_PROMPTS.md).
 
-## Public dataset
+## DevOps datasets
 
-The project includes Loghub HDFS and BGL 2K samples with license/citation files.
-Prepare deterministic train/validation/test records and index only the training split:
+The project includes Loghub HDFS, BGL, Apache, OpenSSH, Linux, and ZooKeeper 2K
+samples with license/citation files, plus
+20 original MIT-licensed diagnostic scenarios covering Kubernetes, CI/CD, Terraform,
+containers, cloud, networking, observability, databases, caches, messaging, and SRE.
+Prepare deterministic Loghub train/validation/test records, then index its training
+split together with the curated DevOps knowledge:
 
 ```bash
 ./venv/bin/python scripts/prepare_loghub_dataset.py

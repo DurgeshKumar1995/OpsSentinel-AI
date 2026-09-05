@@ -25,6 +25,8 @@ from pydantic import ValidationError
 import api
 from graph.workflow import get_graph_builder
 from models.schemas import RestartServiceInput
+from scripts.index_dataset import DEVOPS_DATASET, document_content
+from scripts.prepare_loghub_dataset import SOURCES
 from services.agent_logic import execute_tools
 from services.domain import is_devops_follow_up, is_devops_request, is_project_info_request
 from services.embeddings import LocalHashEmbedder
@@ -278,6 +280,46 @@ class LearningStoreTests(unittest.TestCase):
         self.assertTrue(indexed)
         self.assertEqual(documents[0].source, "loghub/bgl")
         self.assertEqual(documents[0].metadata["event_id"], "E77")
+
+    def test_curated_devops_dataset_is_valid_and_retrievable(self):
+        with DEVOPS_DATASET.open(encoding="utf-8") as stream:
+            records = [json.loads(line) for line in stream if line.strip()]
+        self.assertGreaterEqual(len(records), 20)
+        self.assertEqual(len({record["id"] for record in records}), len(records))
+        required = {
+            "id", "source", "topic", "title", "symptoms", "likely_causes",
+            "diagnostics", "safety",
+        }
+        self.assertTrue(all(required <= record.keys() for record in records))
+
+        store = LearningStore(
+            os.path.join(self.temp_dir.name, "devops-knowledge.db"),
+            embedder=LocalHashEmbedder(256),
+        )
+        crashloop = next(record for record in records if record["id"] == "k8s-crashloop-001")
+        self.assertTrue(
+            store.index_document(
+                crashloop["source"],
+                document_content(crashloop),
+                {"id": crashloop["id"], "topic": crashloop["topic"]},
+            )
+        )
+        documents = store.search_documents(
+            "Kubernetes pod CrashLoopBackOff restart", threshold=-1.0
+        )
+        self.assertEqual(documents[0].metadata["id"], "k8s-crashloop-001")
+        self.assertIn("Safe diagnostics", documents[0].content)
+
+    def test_downloaded_loghub_sources_are_available(self):
+        self.assertEqual(
+            set(SOURCES),
+            {"hdfs", "bgl", "apache", "openssh", "linux", "zookeeper"},
+        )
+        for source, path in SOURCES.items():
+            with self.subTest(source=source):
+                self.assertTrue(path.is_file())
+                with path.open(encoding="utf-8") as stream:
+                    self.assertEqual(sum(1 for _ in stream), 2001)
 
     def test_injection_content_is_not_saved_to_learned_response_cache(self):
         self.store.remember_safe_response(
@@ -647,6 +689,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("Manage tags", response.text)
         self.assertIn('id="tag-manager"', response.text)
         self.assertIn("ESTIMATED COST", response.text)
+        self.assertIn("styles.css?v=8", response.text)
         self.assertLess(
             response.text.index('class="result-title"'),
             response.text.index('class="response-icon-actions"'),
@@ -660,6 +703,13 @@ class ApiTests(unittest.TestCase):
         self.assertIn("data:text/plain;charset=utf-8", response.text)
         self.assertIn("opssentinel-prompt-library-v1", response.text)
         self.assertIn("renderPromptLibrary", response.text)
+
+    def test_prompt_tag_area_has_compact_scrollable_styling(self):
+        response = self.client.get("/static/styles.css")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(".prompt-groups{display:grid", response.text)
+        self.assertIn("max-height:132px", response.text)
+        self.assertIn("overflow-y:auto", response.text)
 
     def test_old_docs_url_redirects_regular_users_home(self):
         response = self.client.get("/docs", follow_redirects=False)

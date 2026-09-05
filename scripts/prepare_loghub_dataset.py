@@ -11,6 +11,10 @@ OUTPUT = ROOT / "data/datasets/processed"
 SOURCES = {
     "hdfs": RAW / "HDFS_2k.log_structured.csv",
     "bgl": RAW / "BGL_2k.log_structured.csv",
+    "apache": RAW / "Apache_2k.log_structured.csv",
+    "openssh": RAW / "OpenSSH_2k.log_structured.csv",
+    "linux": RAW / "Linux_2k.log_structured.csv",
+    "zookeeper": RAW / "Zookeeper_2k.log_structured.csv",
 }
 
 
@@ -32,10 +36,12 @@ def convert() -> dict[str, int]:
                 for row in csv.DictReader(stream):
                     identifier = f"{source}:{row['LineId']}"
                     split = split_for(identifier)
-                    label = (
-                        "anomaly" if source == "bgl" and row.get("Label") != "-"
-                        else "normal"
-                    )
+                    if source == "bgl":
+                        label = "anomaly" if row.get("Label") != "-" else "normal"
+                    elif source == "hdfs":
+                        label = "normal"
+                    else:
+                        label = "unlabeled"
                     record = {
                         "id": identifier,
                         "source": f"loghub/{source}",
