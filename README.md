@@ -129,6 +129,7 @@ random value of at least 16 characters:
 
 ```env
 USAGE_ADMIN_KEY=replace-with-a-long-random-value
+OPERATOR_API_KEY=replace-with-a-different-long-random-value
 ```
 
 Then request history with `X-Admin-Key`:
@@ -137,6 +138,11 @@ Then request history with `X-Admin-Key`:
 curl -H "X-Admin-Key: $USAGE_ADMIN_KEY" \
   "http://127.0.0.1:8000/usage?limit=50"
 ```
+
+`OPERATOR_API_KEY` authorizes reviewed feedback through `X-Operator-Key`. Approval
+of a pending infrastructure action additionally requires the capability returned for
+that exact thread and action; the web UI handles this capability automatically. Never
+expose either configured key in client-side source code.
 
 ## Test
 

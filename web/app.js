@@ -6,11 +6,15 @@ const result = $('#result');
 const feedback = $('#feedback');
 const approvalCard = $('#approval-card');
 const logFileInput = $('#incident-log-file');
+const responseEmpty = $('#response-empty');
 let threadId = null;
 let originalSymptom = '';
 let latestAnswer = '';
+let approvalToken = '';
 
 const PROMPT_LIBRARY_KEY = 'opssentinel-prompt-library-v1';
+const SESSION_STORE_KEY = 'opssentinel-incident-sessions-v1';
+const APPROVAL_STORE_KEY = 'opssentinel-pending-approvals-v1';
 const DEFAULT_PROMPT_LIBRARY = {
   groups: [{id: 'diagnostics', name: 'Diagnostics'}, {id: 'recovery', name: 'Recovery'}],
   tags: [
@@ -19,8 +23,122 @@ const DEFAULT_PROMPT_LIBRARY = {
   ],
 };
 let promptLibrary = loadPromptLibrary();
+let sessions = loadSessions();
 
 function newId(prefix) { return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+
+function loadSessions() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SESSION_STORE_KEY));
+    if (Array.isArray(saved)) return saved.filter((session) => session?.id && Array.isArray(session.turns)).slice(0, 20);
+  } catch (_) { /* Invalid session history is ignored. */ }
+  return [];
+}
+
+function approvalTokens() {
+  try { return JSON.parse(sessionStorage.getItem(APPROVAL_STORE_KEY)) || {}; }
+  catch (_) { return {}; }
+}
+
+function storeApprovalToken(id, token) {
+  const tokens = approvalTokens();
+  if (token) tokens[id] = token;
+  else delete tokens[id];
+  sessionStorage.setItem(APPROVAL_STORE_KEY, JSON.stringify(tokens));
+}
+
+function responseForStorage(data) {
+  const safe = {...data};
+  delete safe.approval_token;
+  return safe;
+}
+
+function saveSessions() {
+  sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+  sessions = sessions.slice(0, 20);
+  localStorage.setItem(SESSION_STORE_KEY, JSON.stringify(sessions));
+  renderSessions();
+}
+
+function sessionTitle(message) {
+  const compact = message.replace(/\s+/g, ' ').trim();
+  return compact.length > 48 ? `${compact.slice(0, 48)}…` : compact;
+}
+
+function saveSessionTurn(data) {
+  let session = sessions.find((item) => item.id === data.thread_id);
+  if (!session) {
+    session = {id: data.thread_id, title: sessionTitle(originalSymptom), createdAt: Date.now(), updatedAt: Date.now(), turns: []};
+    sessions.push(session);
+  }
+  session.updatedAt = Date.now();
+  session.turns.push({request: originalSymptom, response: responseForStorage(data), createdAt: Date.now()});
+  session.turns = session.turns.slice(-30);
+  storeApprovalToken(session.id, data.approval_token || '');
+  saveSessions();
+}
+
+function updateSessionResponse(data) {
+  const session = sessions.find((item) => item.id === threadId);
+  const turn = session?.turns.at(-1);
+  if (!turn) return;
+  turn.response = responseForStorage(data);
+  session.updatedAt = Date.now();
+  storeApprovalToken(session.id, data.approval_token || '');
+  saveSessions();
+}
+
+function renderSessions() {
+  const list = $('#session-list');
+  const items = sessions.map((session) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `session-item${session.id === threadId ? ' active' : ''}`;
+    const title = document.createElement('strong');
+    title.textContent = session.title || 'Untitled incident';
+    const meta = document.createElement('small');
+    const count = session.turns.length;
+    meta.textContent = `${count} ${count === 1 ? 'request' : 'requests'} · ${new Date(session.updatedAt).toLocaleDateString()}`;
+    button.append(title, meta);
+    button.addEventListener('click', () => activateSession(session.id));
+    return button;
+  });
+  list.replaceChildren(...items);
+  $('#session-empty').classList.toggle('hidden', items.length > 0);
+}
+
+function activateSession(id) {
+  const session = sessions.find((item) => item.id === id);
+  const turn = session?.turns.at(-1);
+  if (!turn) return;
+  threadId = session.id;
+  originalSymptom = turn.request;
+  messageInput.value = turn.request;
+  messageInput.dispatchEvent(new Event('input'));
+  renderSessions();
+  renderResult({...turn.response, approval_token: approvalTokens()[id] || ''});
+  revealWorkspaceResponse();
+}
+
+function startNewSession() {
+  threadId = null; approvalToken = ''; originalSymptom = ''; latestAnswer = '';
+  messageInput.value = ''; messageInput.dispatchEvent(new Event('input'));
+  logFileInput.value = ''; $('#log-file-status').textContent = '';
+  $('#feedback-form').reset(); $('#operator-key-field').classList.add('hidden');
+  result.classList.add('hidden'); feedback.classList.add('hidden'); approvalCard.classList.add('hidden');
+  progress.classList.add('hidden'); responseEmpty.classList.remove('hidden');
+  $('#generated-visual').classList.add('hidden'); $('#download-image').classList.add('hidden'); $('#response-action-status').textContent = '';
+  renderSessions(); setStep(1); messageInput.focus();
+}
+
+function revealWorkspaceResponse() {
+  $('.response-pane').scrollTop = 0;
+  window.requestAnimationFrame(() => {
+    const top = Math.max(0, document.querySelector('.workspace').offsetTop - 72);
+    const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+    window.scrollTo({top, behavior});
+  });
+}
 
 function loadPromptLibrary() {
   try {
@@ -52,7 +170,13 @@ function renderPromptLibrary() {
       button.className = 'prompt-tag';
       button.textContent = tag.label;
       button.title = tag.prompt;
-      button.addEventListener('click', () => { messageInput.value = tag.prompt; messageInput.focus(); });
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.prompt-tag').forEach((item) => item.classList.remove('selected'));
+        button.classList.add('selected');
+        messageInput.value = tag.prompt;
+        messageInput.dispatchEvent(new Event('input'));
+        messageInput.focus();
+      });
       list.append(button);
     });
     section.append(heading, list);
@@ -150,12 +274,30 @@ function setStep(number) {
 
 function showError(message) {
   progress.classList.add('hidden');
+  responseEmpty.classList.add('hidden');
   result.classList.remove('hidden');
   $('#result-icon').textContent = '!';
   $('#result-status').textContent = 'Unable to complete investigation';
   $('#result-message').textContent = message;
   approvalCard.classList.add('hidden');
 }
+
+function updateMessageCount() {
+  const length = messageInput.value.length;
+  $('#message-count').textContent = `${length.toLocaleString()} / 2000`;
+  $('#message-count').classList.toggle('near-limit', length >= 1800);
+  document.querySelectorAll('.prompt-tag.selected').forEach((tag) => {
+    if (tag.title !== messageInput.value) tag.classList.remove('selected');
+  });
+}
+
+messageInput.addEventListener('input', updateMessageCount);
+messageInput.addEventListener('keydown', (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+    event.preventDefault();
+    incidentForm.requestSubmit();
+  }
+});
 
 async function request(url, options = {}) {
   const response = await fetch(url, {
@@ -169,6 +311,7 @@ async function request(url, options = {}) {
 
 function renderResult(data) {
   progress.classList.add('hidden');
+  responseEmpty.classList.add('hidden');
   result.classList.remove('hidden');
   $('#result-icon').textContent = data.status === 'approval_required' ? '!' : '✓';
   $('#result-status').textContent = data.status === 'security_blocked'
@@ -179,6 +322,7 @@ function renderResult(data) {
     ? 'Action needs your approval'
     : data.learned ? 'Answered from learned memory' : 'Investigation complete';
   latestAnswer = data.message || (data.status === 'approval_required' ? 'The agent found evidence that may require a service restart.' : 'The agent completed the workflow.');
+  approvalToken = data.approval_token || '';
   const sourceNote = data.learned ? '\n\nLearned response · No AI or diagnostic tool call was needed.' : '';
   $('#result-message').textContent = latestAnswer + sourceNote;
   const usage = data.usage || {};
@@ -195,11 +339,21 @@ function renderResult(data) {
     );
     $('#feedback-service').value = args.service_name || '';
     approvalCard.classList.remove('hidden');
+    const canDecide = Boolean(approvalToken);
+    $('#approve-button').disabled = !canDecide;
+    $('#deny-button').disabled = !canDecide;
+    $('.safety-note').textContent = canDecide
+      ? 'Nothing will be changed unless you approve this action.'
+      : 'This saved approval has expired. Submit the request again to create a new approval.';
     feedback.classList.add('hidden');
     setStep(2);
   } else {
     approvalCard.classList.add('hidden');
     feedback.classList.remove('hidden');
+    feedback.open = false;
+    $('#feedback-approved').checked = false;
+    $('#operator-key-field').classList.add('hidden');
+    $('#feedback-operator-key').value = '';
     $('#feedback-resolution').value = data.message || '';
     setStep(3);
   }
@@ -330,7 +484,7 @@ function renderFlow(steps) {
     item.textContent = step.label;
     return item;
   }));
-  $('#answer-flow').classList.toggle('hidden', steps.length === 0);
+  $('#processing-details').classList.toggle('hidden', steps.length === 0);
 }
 
 function detail(label, value) {
@@ -366,6 +520,7 @@ $('#tag-form').addEventListener('submit', (event) => {
   savePromptLibrary();
 });
 renderPromptLibrary();
+renderSessions();
 
 incidentForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -373,8 +528,10 @@ incidentForm.addEventListener('submit', async (event) => {
   if (!originalSymptom) return;
   result.classList.add('hidden');
   feedback.classList.add('hidden');
+  responseEmpty.classList.add('hidden');
   progress.classList.remove('hidden');
   $('#investigate-button').disabled = true;
+  $('#investigate-label').textContent = 'Investigating…';
   setStep(2);
   try {
     const payload = {message: originalSymptom};
@@ -392,11 +549,14 @@ incidentForm.addEventListener('submit', async (event) => {
     const data = await request(endpoint, {method: 'POST', body: JSON.stringify(payload)});
     threadId = data.thread_id;
     renderResult(data);
+    saveSessionTurn(data);
+    revealWorkspaceResponse();
     await generateVisual(data);
   } catch (error) {
     showError(error.message);
   } finally {
     $('#investigate-button').disabled = false;
+    $('#investigate-label').textContent = 'Start investigation';
   }
 });
 
@@ -405,20 +565,22 @@ async function decide(approved) {
   $('#approve-button').disabled = true;
   $('#deny-button').disabled = true;
   try {
-    const data = await request(`/incidents/${encodeURIComponent(threadId)}/approval`, {method: 'POST', body: JSON.stringify({approved})});
+    const data = await request(`/incidents/${encodeURIComponent(threadId)}/approval`, {method: 'POST', body: JSON.stringify({approved, approval_token: approvalToken})});
     if (data.status === 'denied') {
-      renderResult({...data, message: 'The restart was denied. No production change was made.'});
-    } else { renderResult(data); await generateVisual(data); }
+      const denied = {...data, message: 'The restart was denied. No production change was made.'};
+      renderResult(denied); updateSessionResponse(denied);
+    } else { renderResult(data); updateSessionResponse(data); await generateVisual(data); }
   } catch (error) { showError(error.message); }
   finally { $('#approve-button').disabled = false; $('#deny-button').disabled = false; }
 }
 
 $('#approve-button').addEventListener('click', () => decide(true));
 $('#deny-button').addEventListener('click', () => decide(false));
-$('#new-incident').addEventListener('click', () => {
-  threadId = null; originalSymptom = ''; messageInput.value = ''; logFileInput.value = ''; $('#log-file-status').textContent = '';
-  result.classList.add('hidden'); feedback.classList.add('hidden'); approvalCard.classList.add('hidden'); $('#generated-visual').classList.add('hidden'); $('#download-image').classList.add('hidden'); $('#response-action-status').textContent = '';
-  setStep(1); messageInput.focus();
+$('#new-incident').addEventListener('click', startNewSession);
+$('#new-session').addEventListener('click', startNewSession);
+$('#feedback-approved').addEventListener('change', (event) => {
+  $('#operator-key-field').classList.toggle('hidden', !event.target.checked);
+  if (!event.target.checked) $('#feedback-operator-key').value = '';
 });
 
 logFileInput.addEventListener('change', () => {
@@ -443,13 +605,16 @@ $('#feedback-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const status = $('#feedback-status');
   try {
-    const data = await request('/feedback', {method: 'POST', body: JSON.stringify({
+    const approved = $('#feedback-approved').checked;
+    const operatorKey = $('#feedback-operator-key').value;
+    const data = await request('/feedback', {method: 'POST', headers: approved ? {'X-Operator-Key': operatorKey} : {}, body: JSON.stringify({
       service_name: $('#feedback-service').value,
       symptom: originalSymptom,
       resolution: $('#feedback-resolution').value,
       rating: Number($('#feedback-rating').value),
-      operator_approved: $('#feedback-approved').checked,
+      operator_approved: approved,
     })});
+    $('#feedback-operator-key').value = '';
     status.textContent = data.learned ? 'Saved. This reviewed lesson can help future investigations.' : 'Saved for review. It will not influence the agent yet.';
   } catch (error) { status.textContent = error.message; }
 });

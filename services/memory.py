@@ -1,6 +1,7 @@
 """Reviewed, durable memory for improving future incident responses."""
 
 import hashlib
+import heapq
 import json
 import re
 import sqlite3
@@ -273,9 +274,10 @@ class LearningStore:
         scored = [
             (cosine_similarity(query_vector, json.loads(row[3])), row) for row in rows
         ]
+        best = heapq.nlargest(limit, scored, key=lambda item: item[0])
         return [
             KnowledgeDocument(row[0], row[1], json.loads(row[2]), score)
-            for score, row in sorted(scored, key=lambda item: item[0], reverse=True)[:limit]
+            for score, row in best
             if score >= threshold
         ]
 

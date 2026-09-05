@@ -26,3 +26,8 @@ terminal transcript, container configuration, screenshot, issue, or commit.
 The `/usage` endpoint requires `X-Admin-Key` and is disabled when
 `USAGE_ADMIN_KEY` is not configured. Treat its results as private because they
 contain redacted user prompts and usage metadata.
+
+Operator-approved feedback requires `X-Operator-Key`. Pending tool actions use a
+capability bound to the exact thread, tool name, and arguments. These controls reduce
+unauthorized mutation and memory poisoning but do not replace user authentication,
+RBAC, or tenant isolation for a real deployment.

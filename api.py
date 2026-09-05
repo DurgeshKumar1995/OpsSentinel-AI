@@ -1,5 +1,9 @@
 """OpsSentinel AI HTTP application."""
 
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import secrets
 from contextlib import asynccontextmanager
@@ -9,6 +13,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from openai import OpenAIError
 from pydantic import BaseModel, Field
@@ -19,10 +24,13 @@ from services.agent_logic import analyze_uploaded_logs, execute_tools
 from services.audit import AuditLogger
 from services.domain import (
     OUT_OF_SCOPE_MESSAGE,
+    PROJECT_IMPROVEMENT_MESSAGE,
     PROJECT_INFO_MESSAGE,
     is_devops_follow_up,
     is_devops_request,
+    is_project_improvement_request,
     is_project_info_request,
+    requested_restart_action,
 )
 from services.embeddings import create_embedder
 from services.local_reasoning import try_local_readonly_answer
@@ -69,6 +77,7 @@ class UploadedLogRequest(BaseModel):
 
 class ApprovalRequest(BaseModel):
     approved: bool
+    approval_token: str = Field(min_length=20, max_length=500)
 
 
 class FeedbackRequest(BaseModel):
@@ -86,6 +95,20 @@ class VisualRequest(BaseModel):
 
 def _config(thread_id: str):
     return {"configurable": {"thread_id": thread_id}}
+
+
+APPROVAL_SECRET = secrets.token_bytes(32)
+
+
+def _approval_token(thread_id: str, action: dict) -> str:
+    """Bind a capability token to one exact pending action and incident thread."""
+    payload = json.dumps(
+        {"thread_id": thread_id, "name": action.get("name"), "args": action.get("args", {})},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    signature = hmac.new(APPROVAL_SECRET, payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(signature).decode().rstrip("=")
 
 
 def _flow(*steps: tuple[str, str, str]) -> list[dict[str, str]]:
@@ -111,6 +134,7 @@ def _response(thread_id: str, state: dict) -> dict:
         "status": status,
         "message": getattr(last, "content", ""),
         "pending_action": pending,
+        "approval_token": _approval_token(thread_id, pending) if pending else None,
         "source": "tools",
         "learned": False,
         "usage": usage,
@@ -234,6 +258,24 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("answer", "Request safely blocked", "complete"),
             ),
         })
+    if is_project_improvement_request(payload.message):
+        audit.write("incident_completed", thread_id=thread_id, source="project_improvement")
+        return _track(memory, payload.message, {
+            "thread_id": thread_id,
+            "status": "completed",
+            "message": PROJECT_IMPROVEMENT_MESSAGE,
+            "pending_action": None,
+            "source": "project_improvement",
+            "learned": False,
+            "usage": zero_usage(),
+            "flow": _flow(
+                ("request", "Improvement question received", "complete"),
+                ("guard", "Security check completed", "complete"),
+                ("review", "Project priorities reviewed", "complete"),
+                ("ai", "External AI call skipped", "skipped"),
+                ("answer", "Prioritized improvements returned", "complete"),
+            ),
+        })
     if is_project_info_request(payload.message):
         audit.write("incident_completed", thread_id=thread_id, source="project_info")
         return _track(memory, payload.message, {
@@ -271,6 +313,30 @@ def create_incident(payload: IncidentRequest, request: Request):
                 ("answer", "Scope guidance returned", "complete"),
             ),
         })
+    requested_action = requested_restart_action(payload.message)
+    if requested_action:
+        pending_message = AIMessage(
+            content=(
+                "A production restart has been prepared as a proposal only. No action has run. "
+                "Review the target and reason below, then explicitly approve or deny the action."
+            ),
+            tool_calls=[{
+                "name": "restart_service",
+                "args": requested_action,
+                "id": f"restart-{thread_id}",
+                "type": "tool_call",
+            }],
+        )
+        state = {
+            "messages": [("user", payload.message), pending_message],
+            "hitl_approved": False,
+            "agent_steps": 1,
+        }
+        agent.update_state(_config(thread_id), state)
+        response = _response(thread_id, state)
+        response["source"] = "human_approval_gate"
+        audit.write("action_approval_requested", thread_id=thread_id, **requested_action)
+        return _track(memory, payload.message, response)
     # A referential follow-up must be answered from this thread's conversation,
     # never from a standalone response cached for similar wording.
     recalled = None if contextual_follow_up else memory.recall_safe_response(payload.message)
@@ -319,13 +385,17 @@ def create_incident(payload: IncidentRequest, request: Request):
         memory.remember_safe_response(payload.message, response["message"])
         audit.write("incident_completed", thread_id=thread_id, source="local_tools")
         return _track(memory, payload.message, response)
-    state = agent.invoke(
-        {"messages": [("user", payload.message)], "hitl_approved": False, "agent_steps": 0},
-        config=_config(thread_id),
-    )
+    try:
+        state = agent.invoke(
+            {"messages": [("user", payload.message)], "hitl_approved": False, "agent_steps": 0},
+            config=_config(thread_id),
+        )
+    except (OpenAIError, OSError, TimeoutError) as error:
+        logger.exception("incident_ai_failed error_type=%s", type(error).__name__)
+        audit.write("incident_ai_failed", thread_id=thread_id, error_type=type(error).__name__)
+        raise HTTPException(status_code=502, detail="The AI service is temporarily unavailable") from error
     response = _response(thread_id, state)
-    if response["status"] == "completed" and not _contains_risky_action(state):
-        memory.remember_safe_response(payload.message, response["message"])
+    # Model-generated answers remain untrusted until reviewed by an operator.
     audit.write("incident_result", thread_id=thread_id, status=response["status"], source="tools")
     return _track(memory, payload.message, response)
 
@@ -348,9 +418,14 @@ def analyze_log_file(payload: UploadedLogRequest, request: Request):
         raise HTTPException(status_code=400, detail=security.reason)
     thread_id = payload.thread_id or str(uuid4())
     safe_content = redact_secrets(payload.content.replace("\x00", ""))
-    result = analyze_uploaded_logs(
-        redact_secrets(payload.message), filename, safe_content
-    )
+    try:
+        result = analyze_uploaded_logs(
+            redact_secrets(payload.message), filename, safe_content
+        )
+    except (OpenAIError, OSError, TimeoutError) as error:
+        logger.exception("log_analysis_ai_failed error_type=%s", type(error).__name__)
+        audit.write("log_analysis_ai_failed", thread_id=thread_id, error_type=type(error).__name__)
+        raise HTTPException(status_code=502, detail="The AI service is temporarily unavailable") from error
     # Keep the operator request and safe analysis result for later follow-up
     # questions, but do not retain the raw uploaded log in conversation memory.
     request.app.state.agent.update_state(
@@ -396,6 +471,11 @@ def decide_action(thread_id: str, payload: ApprovalRequest, request: Request):
     calls = getattr(state["messages"][-1], "tool_calls", []) or []
     if not any(call["name"] == "restart_service" for call in calls):
         raise HTTPException(status_code=409, detail="No restart is awaiting approval")
+    pending = next(call for call in calls if call["name"] == "restart_service")
+    expected_token = _approval_token(thread_id, pending)
+    if not secrets.compare_digest(payload.approval_token, expected_token):
+        audit.write("action_decision_rejected", thread_id=thread_id, reason="invalid_capability")
+        raise HTTPException(status_code=403, detail="Invalid or expired approval capability")
     if not payload.approved:
         audit.write("action_decided", thread_id=thread_id, approved=False)
         response = {
@@ -448,11 +528,22 @@ def usage_history(
 
 
 @app.post("/feedback", status_code=201)
-def submit_feedback(payload: FeedbackRequest, request: Request):
+def submit_feedback(
+    payload: FeedbackRequest,
+    request: Request,
+    x_operator_key: str | None = Header(default=None),
+):
     memory = request.app.state.memory
     for value in (payload.service_name, payload.symptom, payload.resolution):
         if not inspect_prompt(value).allowed:
             raise HTTPException(status_code=400, detail="Feedback contains unsafe instruction-like content.")
+    if payload.operator_approved:
+        if not settings.operator_api_key:
+            raise HTTPException(status_code=503, detail="Operator approval is not configured")
+        if not x_operator_key or not secrets.compare_digest(
+            x_operator_key, settings.operator_api_key
+        ):
+            raise HTTPException(status_code=403, detail="Valid operator credentials are required")
     lesson_id = memory.record(
         Lesson(
             payload.service_name,

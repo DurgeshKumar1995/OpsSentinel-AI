@@ -110,11 +110,64 @@ PROJECT_INFO_PATTERNS = (
     r"\b(?:show|provide|give)(?: me)?\s+(?:the\s+)?(?:steps?|flow|instructions?)\s+(?:to|for|on)\s+(?:use|using)\s+(?:you|this|the (?:app|application|project|agent))\b",
 )
 
+PROJECT_IMPROVEMENT_PATTERNS = (
+    r"\bwhat\s+(?:will|would|can|could)\s+(?:help|improve|make)\s+(?:this|the)\s+(?:project|app|application|agent)\b",
+    r"\bhow\s+(?:can|could|should|to)\s+(?:we\s+)?improve\s+(?:this|the)\s+(?:project|app|application|agent)\b",
+    r"\b(?:suggest|recommend|show)(?: me)?\s+(?:some\s+)?improvements?\s+(?:for|to)\s+(?:this|the)\s+(?:project|app|application|agent)\b",
+)
+
 
 def is_project_info_request(text: str) -> bool:
     """Recognize requests asking the agent to introduce this project or its usage."""
     normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
     return any(re.search(pattern, normalized) for pattern in PROJECT_INFO_PATTERNS)
+
+
+def is_project_improvement_request(text: str) -> bool:
+    """Recognize requests for ways to improve OpsSentinel AI itself."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    return any(re.search(pattern, normalized) for pattern in PROJECT_IMPROVEMENT_PATTERNS)
+
+
+def requested_restart_action(text: str) -> dict[str, str] | None:
+    """Return an approval-gated restart proposal explicitly requested by an operator."""
+    normalized = re.sub(r"[^a-z0-9_-]+", " ", text.lower()).strip()
+    requests_restart = bool(re.search(r"\brestart(?:ing)?\b", normalized))
+    requests_decision = bool(
+        re.search(r"\b(?:propose|proposed|approve|approval|perform|execute|action)\b", normalized)
+    )
+    targets_live_environment = bool(re.search(r"\b(?:production|prod|live)\b", normalized))
+    if not (requests_restart and requests_decision and targets_live_environment):
+        return None
+
+    service_patterns = (
+        r"restart(?:ing)?\s+(?:the\s+)?([a-z0-9][a-z0-9_-]{1,79})(?:\s+(?:production|prod|live))?",
+        r"([a-z0-9][a-z0-9_-]{1,79})\s+(?:service|deployment).{0,40}\brestart",
+    )
+    service_name = "unspecified-service"
+    ignored_targets = {"a", "an", "production", "prod", "live", "service", "deployment"}
+    for pattern in service_patterns:
+        match = re.search(pattern, normalized)
+        if match and match.group(1) not in ignored_targets:
+            service_name = match.group(1)
+            break
+    return {
+        "service_name": service_name,
+        "reason": "Operator requested a production restart proposal; execution requires explicit approval.",
+    }
+
+
+PROJECT_IMPROVEMENT_MESSAGE = (
+    "The most valuable improvements for OpsSentinel AI are:\n\n"
+    "1. Real read-only integrations — connect Kubernetes, Prometheus, Grafana, and an authorized log store.\n"
+    "2. Identity and access — add user authentication, role-based permissions, tenant isolation, and environment-specific policies.\n"
+    "3. Better evaluations — measure diagnostic accuracy, retrieval quality, safety, latency, token usage, and cost before releasing prompt or model changes.\n"
+    "4. Shared reliability services — replace in-memory checkpoints and rate limiting with durable shared services for multiple workers.\n"
+    "5. Memory governance — show sources, require operator review, and support expiry, correction, and deletion of learned lessons.\n"
+    "6. Observability — trace every model, retrieval, tool, approval, and failure step with dashboards and alerts.\n"
+    "7. Safe remediation previews — provide dry-run plans and impact summaries before requesting approval.\n\n"
+    "Best next step: implement an authenticated, read-only Kubernetes or Prometheus adapter and evaluate it against versioned incident scenarios."
+)
 
 
 PROJECT_INFO_MESSAGE = (

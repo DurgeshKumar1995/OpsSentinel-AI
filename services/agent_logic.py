@@ -75,6 +75,7 @@ def call_agent(state: IncidentState):
     user_context = " ".join(
         str(getattr(message, "content", "")) for message in state["messages"] if message.type == "human"
     )
+    dataset_context = "Public dataset retrieval is currently unavailable."
     try:
         memory = LearningStore(embedder=create_embedder(settings))
         lessons = format_lessons(memory.relevant(user_context))

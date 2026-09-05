@@ -40,6 +40,7 @@ class Settings(BaseSettings):
         default_factory=lambda: _runtime_path("data/audit.jsonl", "/tmp/audit.jsonl")
     )
     usage_admin_key: str | None = Field(default=None, repr=False)
+    operator_api_key: str | None = Field(default=None, repr=False)
     tool_mode: Literal["mock", "live"] = "mock"
     allowed_services: str = "auth-service,payment-gateway"
     embedding_provider: Literal["local", "openai"] = "local"
@@ -61,7 +62,7 @@ class Settings(BaseSettings):
     def service_allowlist(self) -> set[str]:
         return {item.strip() for item in self.allowed_services.split(",") if item.strip()}
 
-    @field_validator("usage_admin_key", mode="before")
+    @field_validator("usage_admin_key", "operator_api_key", mode="before")
     @classmethod
     def normalize_optional_secret(cls, value):
         if isinstance(value, str) and not value.strip():
@@ -72,12 +73,16 @@ class Settings(BaseSettings):
     def validate_production(self):
         if self.usage_admin_key and len(self.usage_admin_key) < 16:
             raise ValueError("USAGE_ADMIN_KEY must contain at least 16 characters")
+        if self.operator_api_key and len(self.operator_api_key) < 16:
+            raise ValueError("OPERATOR_API_KEY must contain at least 16 characters")
         if self.app_env == "production" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required in production")
         if self.app_env == "production" and self.tool_mode == "mock":
             raise ValueError("TOOL_MODE=mock is forbidden in production")
         if self.app_env == "production" and not self.usage_admin_key:
             raise ValueError("USAGE_ADMIN_KEY is required in production")
+        if self.app_env == "production" and not self.operator_api_key:
+            raise ValueError("OPERATOR_API_KEY is required in production")
         if self.embedding_provider == "openai" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for EMBEDDING_PROVIDER=openai")
         return self

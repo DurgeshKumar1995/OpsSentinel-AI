@@ -18,8 +18,9 @@ os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
+from openai import OpenAIError
 from pydantic import ValidationError
 
 import api
@@ -27,8 +28,13 @@ from graph.workflow import get_graph_builder
 from models.schemas import RestartServiceInput
 from scripts.index_dataset import DEVOPS_DATASET, document_content
 from scripts.prepare_loghub_dataset import SOURCES
-from services.agent_logic import execute_tools
-from services.domain import is_devops_follow_up, is_devops_request, is_project_info_request
+from services.agent_logic import call_agent, execute_tools
+from services.domain import (
+    is_devops_follow_up,
+    is_devops_request,
+    is_project_improvement_request,
+    is_project_info_request,
+)
 from services.embeddings import LocalHashEmbedder
 from services.local_reasoning import try_local_readonly_answer
 from services.memory import LearningStore, Lesson
@@ -166,6 +172,20 @@ class IncidentWorkflowTests(unittest.TestCase):
         payload = json.loads(result["messages"][0].content)
 
         self.assertIn("Tool execution rejected", payload["error"])
+
+    def test_dataset_failure_degrades_without_masking_the_agent_answer(self):
+        model = Mock()
+        model.invoke.return_value = AIMessage(content="Use current evidence and continue diagnosis.")
+        with patch(
+            "services.agent_logic.LearningStore.search_documents",
+            side_effect=OSError("dataset unavailable"),
+        ), patch("services.agent_logic.llm_with_tools", model):
+            result = call_agent(
+                {"messages": [HumanMessage(content="Investigate Kubernetes pod failure")], "agent_steps": 0}
+            )
+        self.assertEqual(result["messages"][0].content, "Use current evidence and continue diagnosis.")
+        system_prompt = model.invoke.call_args.args[0][0]["content"]
+        self.assertIn("dataset retrieval is currently unavailable", system_prompt)
 
 
 class LearningStoreTests(unittest.TestCase):
@@ -428,6 +448,11 @@ class SecurityTests(unittest.TestCase):
         self.assertTrue(is_project_info_request("Provide the steps to use this project"))
         self.assertFalse(is_project_info_request("Explain a Kubernetes deployment"))
 
+    def test_project_improvement_requests_are_recognized(self):
+        self.assertTrue(is_project_improvement_request("what will help this project"))
+        self.assertTrue(is_project_improvement_request("How can we improve this app?"))
+        self.assertFalse(is_project_improvement_request("Improve Kubernetes availability"))
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -466,6 +491,18 @@ class ApiTests(unittest.TestCase):
         self.assertIn("How to use this project", payload["message"])
         self.assertIn("Overall flow:", payload["message"])
         self.assertEqual(payload["usage"]["input_tokens"], 0)
+        invoke.assert_not_called()
+
+    def test_project_improvement_returns_priorities_without_ai(self):
+        with patch.object(self.client.app.state.agent, "invoke") as invoke:
+            response = self.client.post(
+                "/incidents", json={"message": "what will help this project"}
+            )
+        payload = response.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["source"], "project_improvement")
+        self.assertIn("Real read-only integrations", payload["message"])
+        self.assertIn("Best next step", payload["message"])
         invoke.assert_not_called()
 
     def test_kubectl_question_reaches_agent(self):
@@ -518,6 +555,19 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "completed")
+
+    def test_uploaded_log_ai_failure_returns_controlled_gateway_error(self):
+        with patch("api.analyze_uploaded_logs", side_effect=OpenAIError("unavailable")):
+            response = self.client.post(
+                "/incidents/log-analysis",
+                json={
+                    "message": "Analyze this production log",
+                    "filename": "orders.log",
+                    "content": "ERROR dependency timeout",
+                },
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "The AI service is temporarily unavailable")
 
     def test_uploaded_log_rejects_unsupported_file_type(self):
         response = self.client.post(
@@ -688,8 +738,29 @@ class ApiTests(unittest.TestCase):
         self.assertIn("Download image", response.text)
         self.assertIn("Manage tags", response.text)
         self.assertIn('id="tag-manager"', response.text)
-        self.assertIn("ESTIMATED COST", response.text)
-        self.assertIn("styles.css?v=8", response.text)
+        self.assertNotIn("Diagnose faster", response.text)
+        self.assertIn("OPS WORKSPACE", response.text)
+        self.assertIn('id="message-count"', response.text)
+        self.assertIn("Model and token details", response.text)
+        self.assertIn("styles.css?v=16", response.text)
+        self.assertIn("Rate this resolution", response.text)
+        self.assertIn('id="operator-key-field"', response.text)
+        self.assertIn('id="session-list"', response.text)
+        self.assertIn('id="response-empty"', response.text)
+        self.assertIn('class="workbench-grid"', response.text)
+        self.assertIn("From signal to safe action.", response.text)
+        self.assertIn("No silent changes", response.text)
+        self.assertIn("HUMAN DECISION REQUIRED", response.text)
+        self.assertLess(
+            response.text.index('id="approval-card"'),
+            response.text.index('id="answer-flow"'),
+        )
+        self.assertLess(
+            response.text.index('id="answer-flow"'),
+            response.text.index('id="usage-summary"'),
+        )
+        self.assertIn("Investigation trace", response.text)
+        self.assertIn("RUN USAGE", response.text)
         self.assertLess(
             response.text.index('class="result-title"'),
             response.text.index('class="response-icon-actions"'),
@@ -703,6 +774,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn("data:text/plain;charset=utf-8", response.text)
         self.assertIn("opssentinel-prompt-library-v1", response.text)
         self.assertIn("renderPromptLibrary", response.text)
+        self.assertIn("incidentForm.requestSubmit()", response.text)
+        self.assertIn("Investigating…", response.text)
+        self.assertIn("opssentinel-incident-sessions-v1", response.text)
+        self.assertIn("saveSessionTurn", response.text)
+        self.assertNotIn("result.scrollIntoView", response.text)
 
     def test_prompt_tag_area_has_compact_scrollable_styling(self):
         response = self.client.get("/static/styles.css")
@@ -750,6 +826,106 @@ class ApiTests(unittest.TestCase):
                 )
         self.assertEqual(response.status_code, 201)
         self.assertFalse(response.json()["learned"])
+
+    def test_approved_feedback_requires_operator_credentials(self):
+        payload = {
+            "service_name": "checkout",
+            "symptom": "high latency",
+            "resolution": "increase connection pool",
+            "rating": 5,
+            "operator_approved": True,
+        }
+        with patch.object(api.settings, "operator_api_key", "operator-key-123456"):
+            rejected = self.client.post("/feedback", json=payload)
+            accepted = self.client.post(
+                "/feedback",
+                json=payload,
+                headers={"X-Operator-Key": "operator-key-123456"},
+            )
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(accepted.status_code, 201)
+        self.assertTrue(accepted.json()["learned"])
+
+    def test_approval_requires_capability_bound_to_pending_action(self):
+        thread_id = "capability-protected-restart"
+        pending = tool_call(
+            "restart_service",
+            {"service_name": "auth-service", "reason": "Service is frozen"},
+            "restart-capability",
+        )
+        self.client.app.state.agent.update_state(
+            api._config(thread_id),
+            {"messages": [("user", "Investigate auth-service"), pending]},
+        )
+        rejected = self.client.post(
+            f"/incidents/{thread_id}/approval",
+            json={"approved": False, "approval_token": "invalid-capability-token"},
+        )
+        accepted = self.client.post(
+            f"/incidents/{thread_id}/approval",
+            json={
+                "approved": False,
+                "approval_token": api._approval_token(thread_id, pending.tool_calls[0]),
+            },
+        )
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json()["status"], "denied")
+
+    def test_explicit_production_restart_always_requires_human_approval(self):
+        message = (
+            "The authentication service is returning HTTP 503 errors after the latest deployment. "
+            "Users cannot log in. Review the incident details, identify the likely cause, and propose "
+            "restarting the auth-service production deployment. Do not perform any risky action until "
+            "I explicitly approve it."
+        )
+        with patch.object(self.client.app.state.agent, "invoke") as invoke:
+            response = self.client.post("/incidents", json={"message": message})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "approval_required")
+        self.assertEqual(body["source"], "human_approval_gate")
+        self.assertEqual(body["pending_action"]["name"], "restart_service")
+        self.assertEqual(body["pending_action"]["args"]["service_name"], "auth-service")
+        self.assertGreaterEqual(len(body["approval_token"]), 20)
+        invoke.assert_not_called()
+
+        denied = self.client.post(
+            f'/incidents/{body["thread_id"]}/approval',
+            json={"approved": False, "approval_token": body["approval_token"]},
+        )
+        self.assertEqual(denied.status_code, 200)
+        self.assertEqual(denied.json()["status"], "denied")
+
+    def test_model_generated_answer_is_not_automatically_cached(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LearningStore(os.path.join(temp_dir, "unreviewed-model-memory.db"))
+            state = {"messages": [AIMessage(content="Use a staged deployment strategy.")]}
+            with patch.object(self.client.app.state, "memory", store), patch.object(
+                self.client.app.state.agent, "invoke", return_value=state
+            ) as invoke:
+                first = self.client.post(
+                    "/incidents", json={"message": "Explain Kubernetes deployment strategy"}
+                )
+                second = self.client.post(
+                    "/incidents", json={"message": "Explain Kubernetes deployment strategy"}
+                )
+        self.assertEqual(first.json()["source"], "tools")
+        self.assertEqual(second.json()["source"], "tools")
+        self.assertEqual(invoke.call_count, 2)
+
+    def test_ai_provider_failure_returns_controlled_gateway_error(self):
+        with patch.object(
+            self.client.app.state.agent,
+            "invoke",
+            side_effect=OpenAIError("provider unavailable"),
+        ):
+            response = self.client.post(
+                "/incidents", json={"message": "Explain Kubernetes deployment strategy"}
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "The AI service is temporarily unavailable")
 
     def test_second_identical_safe_query_uses_memory_without_agent(self):
         with tempfile.TemporaryDirectory() as temp_dir:

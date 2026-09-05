@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="OpsSentinel AI human-supervised incident response workspace">
   <title>OpsSentinel AI · Incident Agent</title>
-  <link rel="stylesheet" href="/static/styles.css?v=8">
+  <link rel="stylesheet" href="/static/styles.css?v=16">
 </head>
 <body>
   <header class="topbar">
@@ -17,32 +17,34 @@
   </header>
 
   <main>
-    <section class="hero">
-      <p class="eyebrow">AI INCIDENT RESPONSE</p>
-      <h1>Diagnose faster.<br><span>Act with control.</span></h1>
-      <p class="hero-copy">Describe what is happening. OpsSentinel AI checks evidence, explains its findings, and always asks before taking a risky action.</p>
-    </section>
-
     <section class="workspace" aria-labelledby="incident-heading">
-      <div class="step-rail" aria-label="Incident workflow">
-        <div class="step active" data-step="1"><span>1</span><div><b>Report</b><small>Describe the issue</small></div></div>
-        <div class="line"></div>
-        <div class="step" data-step="2"><span>2</span><div><b>Investigate</b><small>Review evidence</small></div></div>
-        <div class="line"></div>
-        <div class="step" data-step="3"><span>3</span><div><b>Resolve</b><small>Approve and learn</small></div></div>
+      <div class="navigation-rail">
+        <div class="session-heading"><div><small>INCIDENT SESSIONS</small><strong>Your workspace</strong></div><button type="button" id="new-session" aria-label="Create new session" title="Create new session">＋</button></div>
+        <div id="session-list" class="session-list" aria-label="Saved incident sessions"></div>
+        <p id="session-empty" class="session-empty">Your investigations will appear here.</p>
+        <div class="workflow-compact" aria-label="Incident workflow">
+          <div class="step active" data-step="1"><span>1</span><div><b>Report</b><small>Describe</small></div></div>
+          <div class="line"></div>
+          <div class="step" data-step="2"><span>2</span><div><b>Investigate</b><small>Review</small></div></div>
+          <div class="line"></div>
+          <div class="step" data-step="3"><span>3</span><div><b>Resolve</b><small>Approve</small></div></div>
+        </div>
       </div>
 
       <div class="panel">
         <div class="panel-heading">
           <div>
-            <p class="section-label">NEW INCIDENT</p>
-            <h2 id="incident-heading">What needs attention?</h2>
+            <p class="section-label">OPS WORKSPACE</p>
+            <h1 id="incident-heading">What needs attention?</h1>
+            <p class="panel-subtitle">Investigate incidents with evidence, controlled actions, and a complete audit trail.</p>
           </div>
           <span class="privacy-note">Human-controlled actions</span>
         </div>
 
+        <div class="workbench-grid">
+        <div class="composer-pane">
         <form id="incident-form">
-          <label for="incident-message">Incident details</label>
+          <div class="field-heading"><label for="incident-message">Incident details</label><span id="message-count">0 / 2000</span></div>
           <textarea id="incident-message" required minlength="3" maxlength="2000" placeholder="Ask about a deployment, CI/CD pipeline, cloud service, monitoring alert, or production incident."></textarea>
           <div class="prompt-library">
             <div class="prompt-library-heading"><span>Saved prompt tags</span><button type="button" class="manage-tags" id="manage-tags">Manage tags</button></div>
@@ -58,9 +60,10 @@
             <span><b>Create an AI architecture image</b><small>Returns text first, then creates a supporting DevOps diagram.</small></span>
           </label>
           <button class="primary" type="submit" id="investigate-button">
-            <span>Start investigation</span><span aria-hidden="true">→</span>
+            <span id="investigate-label">Start investigation</span><span aria-hidden="true">→</span>
           </button>
         </form>
+        </div>
 
         <dialog id="tag-manager" class="tag-manager">
           <div class="tag-manager-heading"><div><p class="section-label">PROMPT LIBRARY</p><h3>Manage tags and groups</h3></div><button type="button" class="dialog-close" id="close-tag-manager" aria-label="Close tag manager">×</button></div>
@@ -77,6 +80,12 @@
           <div id="tag-manager-list" class="tag-manager-list"></div>
         </dialog>
 
+        <div class="response-pane">
+        <div id="response-empty" class="response-empty">
+          <span aria-hidden="true">⌁</span>
+          <h2>Ready to investigate</h2>
+          <p>Submit an incident or open a saved session. The response will stay visible here.</p>
+        </div>
         <div id="progress" class="progress hidden" role="status" aria-live="polite">
           <span class="spinner"></span>
           <div><b>Agent is investigating</b><small>Checking current evidence and reviewed incident history…</small></div>
@@ -91,64 +100,103 @@
               <button type="button" class="icon-button download-icon" id="download-response" title="Download response" aria-label="Download response"><span aria-hidden="true"></span></button>
             </div>
           </div>
+          <div id="approval-card" class="approval hidden">
+            <div class="approval-heading">
+              <span class="approval-shield" aria-hidden="true">!</span>
+              <div><p class="warning-label">HUMAN DECISION REQUIRED</p><h3>Approve production restart?</h3></div>
+            </div>
+            <p class="approval-intro">The investigation is paused. Review this proposed action before anything can run.</p>
+            <dl id="action-details"></dl>
+            <div class="approval-footer">
+              <p class="safety-note">Nothing will be changed unless you approve this action.</p>
+              <div class="action-buttons">
+                <button type="button" class="danger" id="approve-button">Approve restart</button>
+                <button type="button" class="secondary" id="deny-button">Deny action</button>
+              </div>
+            </div>
+          </div>
           <p id="result-message"></p>
-          <div id="usage-summary" class="usage-summary" aria-label="AI usage and estimated cost">
-            <div><small>MODEL</small><b id="usage-model">No AI call</b></div>
-            <div><small>INPUT TOKENS</small><b id="usage-input">0</b></div>
-            <div><small>OUTPUT TOKENS</small><b id="usage-output">0</b></div>
-            <div><small>ESTIMATED COST</small><b id="usage-cost">$0.000000</b></div>
-          </div>
-          <div id="answer-flow" class="answer-flow" aria-label="How this answer was produced">
-            <p class="flow-heading">HOW THIS ANSWER WAS PRODUCED</p>
-            <ol id="flow-steps"></ol>
-          </div>
           <section id="generated-visual" class="generated-visual hidden" aria-live="polite">
             <div class="visual-title"><div><small>AI-GENERATED VISUAL</small><h3>Architecture explanation</h3></div><div class="visual-title-actions"><span id="visual-model"></span><button type="button" class="icon-button hidden" id="download-image" title="Download image" aria-label="Download image">↓</button></div></div>
             <div id="visual-loading" class="visual-loading"><span class="spinner"></span> Creating the supporting diagram…</div>
             <img id="visual-image" class="hidden" alt="AI-generated DevOps architecture diagram supporting the response">
             <p id="visual-error" class="visual-error hidden"></p>
           </section>
-          <div id="approval-card" class="approval hidden">
-            <p class="warning-label">APPROVAL REQUIRED</p>
-            <h3>Restart service?</h3>
-            <dl id="action-details"></dl>
-            <p class="safety-note">Nothing will be changed unless you approve this action.</p>
-            <div class="action-buttons">
-              <button type="button" class="danger" id="approve-button">Approve restart</button>
-              <button type="button" class="secondary" id="deny-button">Deny action</button>
+          <details id="processing-details" class="processing-details">
+            <summary><span><b>Investigation trace</b><small>See how this answer was produced</small></span><span aria-hidden="true">⌄</span></summary>
+            <div id="answer-flow" class="answer-flow" aria-label="How this answer was produced">
+              <ol id="flow-steps"></ol>
             </div>
+          </details>
+          <button type="button" class="text-button" id="new-incident">＋ Start a new session</button>
+          <div id="usage-summary" class="usage-summary" aria-label="AI usage and estimated cost">
+            <div class="usage-heading"><small>RUN USAGE</small><span>Model and token details</span></div>
+            <div><small>MODEL</small><b id="usage-model">No AI call</b></div>
+            <div><small>INPUT</small><b id="usage-input">0 <em>tokens</em></b></div>
+            <div><small>OUTPUT</small><b id="usage-output">0 <em>tokens</em></b></div>
+            <div><small>COST</small><b id="usage-cost">$0.000000</b></div>
           </div>
-          <button type="button" class="text-button" id="new-incident">＋ Start another incident</button>
         </section>
 
-        <section id="feedback" class="feedback hidden">
-          <div><p class="section-label">HELP THE AGENT IMPROVE</p><h3>Was this resolution useful?</h3></div>
+        <details id="feedback" class="feedback hidden">
+          <summary class="feedback-summary">
+            <span class="feedback-icon" aria-hidden="true">♡</span>
+            <span><b>Rate this resolution</b><small>Your reviewed feedback can improve future investigations.</small></span>
+            <span class="feedback-chevron" aria-hidden="true">⌄</span>
+          </summary>
           <form id="feedback-form">
-            <input id="feedback-service" aria-label="Service name" placeholder="Service name" required>
-            <textarea id="feedback-resolution" aria-label="Reviewed resolution" placeholder="What resolution worked?" required></textarea>
-            <div class="feedback-row">
-              <label>Rating <select id="feedback-rating"><option value="5">5 — Excellent</option><option value="4">4 — Helpful</option><option value="3">3 — Average</option><option value="2">2 — Poor</option><option value="1">1 — Incorrect</option></select></label>
-              <label class="checkbox"><input type="checkbox" id="feedback-approved"> Approved by operator</label>
+            <div class="feedback-grid">
+              <label>Service<input id="feedback-service" aria-label="Service name" placeholder="For example: auth-service" required></label>
+              <label>Rating<select id="feedback-rating"><option value="5">5 — Excellent</option><option value="4">4 — Helpful</option><option value="3">3 — Average</option><option value="2">2 — Poor</option><option value="1">1 — Incorrect</option></select></label>
             </div>
-            <button class="secondary" type="submit">Save reviewed feedback</button>
-            <small id="feedback-status" role="status"></small>
+            <label>Reviewed resolution<textarea id="feedback-resolution" aria-label="Reviewed resolution" placeholder="Describe what worked or correct the proposed resolution." required></textarea></label>
+            <label class="feedback-approval"><input type="checkbox" id="feedback-approved"><span><b>Approve for learning</b><small>Allow this reviewed outcome to guide similar incidents.</small></span></label>
+            <label id="operator-key-field" class="operator-key-field hidden">Operator approval key<input id="feedback-operator-key" type="password" aria-label="Operator approval key" placeholder="Required for approved learning" autocomplete="off"></label>
+            <div class="feedback-actions"><button class="secondary" type="submit">Save feedback</button><small id="feedback-status" role="status"></small></div>
           </form>
-        </section>
+        </details>
+        </div>
+        </div>
       </div>
     </section>
 
-    <section class="how-it-works">
-      <p class="section-label">HOW IT WORKS</p>
-      <h2>Safe automation, by design.</h2>
-      <div class="feature-grid">
-        <article><span>01</span><h3>Evidence first</h3><p>The agent reads logs before recommending a remediation.</p></article>
-        <article><span>02</span><h3>Human control</h3><p>Risky actions pause until an operator explicitly approves them.</p></article>
-        <article><span>03</span><h3>Reviewed learning</h3><p>Only approved, highly rated outcomes guide future investigations.</p></article>
+    <section class="how-it-works" aria-labelledby="safety-heading">
+      <div class="how-it-works-heading">
+        <div>
+          <p class="section-label">HOW IT WORKS</p>
+          <h2 id="safety-heading">From signal to safe action.</h2>
+        </div>
+        <p>Every investigation follows a controlled, auditable path. You keep the final say.</p>
+      </div>
+      <div class="feature-grid" role="list">
+        <article tabindex="0" role="listitem">
+          <div class="feature-top"><span class="feature-number">01</span><span class="feature-icon" aria-hidden="true">⌕</span></div>
+          <h3>Collect evidence</h3>
+          <p>Logs and incident context are examined before a recommendation is made.</p>
+          <small>INPUT · READ ONLY</small>
+        </article>
+        <article tabindex="0" role="listitem">
+          <div class="feature-top"><span class="feature-number">02</span><span class="feature-icon" aria-hidden="true">◎</span></div>
+          <h3>Review the plan</h3>
+          <p>Findings, impact, and the proposed action remain visible for operator review.</p>
+          <small>DECISION · HUMAN CONTROL</small>
+        </article>
+        <article tabindex="0" role="listitem">
+          <div class="feature-top"><span class="feature-number">03</span><span class="feature-icon" aria-hidden="true">✓</span></div>
+          <h3>Approve and learn</h3>
+          <p>Only explicitly approved outcomes can inform future investigations.</p>
+          <small>OUTCOME · AUDITABLE</small>
+        </article>
+      </div>
+      <div class="safety-summary" aria-label="Safety characteristics">
+        <span><i aria-hidden="true"></i>No silent changes</span>
+        <span><i aria-hidden="true"></i>Approval before risk</span>
+        <span><i aria-hidden="true"></i>Traceable decisions</span>
       </div>
     </section>
   </main>
 
   <footer><span>OpsSentinel AI Incident Agent</span><span>Human-supervised · Evidence-led · Auditable</span></footer>
-  <script src="/static/app.js?v=8" defer></script>
+  <script src="/static/app.js?v=16" defer></script>
 </body>
 </html>
