@@ -1,6 +1,6 @@
 # Direct runtime dependencies only. Transitive packages are resolved by pip.
 fastapi==0.139.2
-langchain-core==1.5.4
+langchain-core==1.6.0
 langchain-openai==1.4.3
 langgraph==1.2.11
 langgraph-checkpoint==4.2.0
